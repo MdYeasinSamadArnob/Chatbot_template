@@ -1,0 +1,82 @@
+# AI Orchestration Chatbot — Docker Compose
+#
+# Services:
+#   ollama   — Local LLM inference (http://localhost:11434)
+#   backend  — Python FastAPI agent (http://localhost:8000)
+#   frontend — Next.js UI           (http://localhost:3000)
+#
+# Usage:
+#   docker compose up --build
+#   # Pull a model (first time only):
+#   docker exec -it ollama ollama pull llama3.2
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    # GPU support (uncomment if you have NVIDIA GPU + nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=bankbot
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    command: ["postgres", "-c", "shared_preload_libraries=pgvector"]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-chatbot-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MODEL_NAME=ollama/llama3.2
+      - CORS_ORIGINS=["http://localhost:3000","http://frontend:3000"]
+      - MEMORY_PERSIST_DIR=/app/memory_store
+      - POSTGRES_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/bankbot
+      - EMBEDDING_MODEL=nomic-embed-text
+    volumes:
+      - backend_memory:/app/memory_store
+    depends_on:
+      - ollama
+      - postgres
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-chatbot-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
+  backend_memory:
+  postgres_data:

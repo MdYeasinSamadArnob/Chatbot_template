@@ -1,0 +1,140 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── CSS variables ─────────────────────────────────────────────────────── */
+:root {
+  /* Banking brand colours */
+  --color-primary: #0A1628;
+  --color-accent: #1A56DB;
+  --color-accent-hover: #1648c0;
+  --color-bg: #F5F7FF;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;          /* prevent overscroll bounce on Android */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Custom scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* ── Safe area padding utility ─────────────────────────────────────────── */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ── Touch action on interactive elements ───────────────────────────────── */
+button, a {
+  touch-action: manipulation;
+}
+
+/* ── Thinking dots animation ───────────────────────────────────────────── */
+@keyframes thinking-bounce {
+  0%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.thinking-dot {
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+.thinking-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.thinking-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* ── Markdown content inside agent messages ────────────────────────────── */
+.agent-markdown p {
+  margin-bottom: 0.5rem;
+  line-height: 1.6;
+}
+.agent-markdown p:last-child {
+  margin-bottom: 0;
+}
+.agent-markdown ul,
+.agent-markdown ol {
+  margin: 0.5rem 0 0.5rem 1.25rem;
+}
+.agent-markdown li {
+  margin-bottom: 0.2rem;
+}
+.agent-markdown code {
+  background: #f1f5f9;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.82em;
+  color: #1e40af;
+}
+.agent-markdown pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.82em;
+}
+.agent-markdown pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+.agent-markdown h1,
+.agent-markdown h2,
+.agent-markdown h3 {
+  font-weight: 600;
+  margin: 0.75rem 0 0.35rem;
+}
+.agent-markdown h1 { font-size: 1.1em; }
+.agent-markdown h2 { font-size: 1em; }
+.agent-markdown h3 { font-size: 0.95em; }
+.agent-markdown blockquote {
+  border-left: 3px solid #e2e8f0;
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  color: #64748b;
+}
+.agent-markdown a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+.agent-markdown strong {
+  font-weight: 600;
+}
+.agent-markdown hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 0.75rem 0;
+}

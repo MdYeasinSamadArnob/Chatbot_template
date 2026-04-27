@@ -1,0 +1,57 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
+# .env
+# .env.*
+# !.env.example
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+backend/.venv/
+.venv/
+venv/
+env/
+
+# ── Memory / SQLite stores ────────────────────────────────────────────────────
+backend/memory_store/
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Alembic generated versions (keep the folder, ignore auto-generated) ───────
+# backend/app/db/alembic/versions/*.py  # uncomment if you want to ignore migrations
+
+# ── Node / Next.js ───────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
