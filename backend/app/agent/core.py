@@ -61,7 +61,9 @@ def _strip_tool_artifacts(text: str) -> str:
     """Remove Llama 3.x internal tool-call markup from text content."""
     if not text:
         return text
-    text = _PYTHON_TAG_RE.sub("", text).strip()
+    stripped, n = _PYTHON_TAG_RE.subn("", text)
+    if n:
+        text = stripped.strip()  # only strip whitespace when tag was removed
     if _BARE_TOOL_JSON_RE.match(text):
         return ""
     return text
@@ -494,10 +496,13 @@ async def run_agent_loop_with_emitter(
 
         # ── 3. No tool calls → final answer, stop ─────────────────────
         if not raw_tool_calls:
+            # Ensure thinking indicator is gone even if no text was emitted
+            await emit_fn("thinking_end", {})
             logger.debug("[%s] no tool calls — final answer", conversation_id)
             break
 
-        # ── 4. Emit tool call notifications (thinking_end already sent by streamer)
+        # ── 4. Emit tool call notifications ───────────────────────────
+        await emit_fn("thinking_end", {})
         parsed_tool_calls: list[tuple[str, str, dict]] = []
         for tc in raw_tool_calls:
             try:
