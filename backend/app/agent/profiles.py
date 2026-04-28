@@ -34,6 +34,9 @@ class AgentProfile:
     # [...] → give the agent only the named tools
     tool_names: list[str] | None = None
     extra_instructions: str = ""
+    # Number of consecutive unresolved turns before auto-escalation is triggered.
+    # 0 means auto-escalation is disabled for this profile.
+    escalation_threshold: int = 0
 
     def get_tools(self) -> list[ToolDefinition]:
         """Resolve tool names to ToolDefinition objects at call time."""
@@ -123,17 +126,24 @@ register_profile(
 register_profile(
     AgentProfile(
         name="banking",
-        description="Bank Help & Support assistant with RAG knowledge base access.",
-        max_iterations=4,
+        description="Bank Help & Support assistant with RAG knowledge base, escalation, and guided flow support.",
+        max_iterations=5,
         temperature=0.2,
-        tool_names=["search_banking_knowledge", "calculate", "get_current_time"],
+        tool_names=[
+            "search_banking_knowledge",
+            "calculate",
+            "get_current_time",
+            "escalate_to_human",
+        ],
+        escalation_threshold=3,
         extra_instructions=(
-            "You are a helpful, professional banking support assistant. "
-            "Always search the knowledge base FIRST before answering any banking question. "
-            "Present answers as clear numbered steps when describing a process. "
-            "Include any inline images exactly as returned by search results (they appear as markdown images). "
-            "Keep answers factual, concise and friendly. "
-            "If you cannot find the answer, politely direct the user to call the bank helpline."
+            "You are a helpful, professional, and empathetic banking support assistant. "
+            "Always search the knowledge base FIRST before answering any new banking question. "
+            "Present procedural answers as clear numbered steps. "
+            "Include inline images exactly as returned by search results. "
+            "Keep answers factual, concise, and friendly. "
+            "When users are frustrated or can't be helped, use escalate_to_human. "
+            "If you cannot find the answer, politely direct the user to the bank helpline."
         ),
     )
 )

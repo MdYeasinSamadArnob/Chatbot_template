@@ -35,7 +35,7 @@ from litellm import acompletion
 
 from app.agent.memory import AgentMemory
 from app.agent.profiles import get_profile
-from app.agent.prompts import build_system_prompt
+from app.agent.prompts import build_system_prompt, build_reexplain_prompt
 from app.agent.streaming import (
     data_part,
     error_part,
@@ -54,19 +54,95 @@ logger = logging.getLogger(__name__)
 # using <|python_tag|> markers or raw JSON. Strip them before display.
 
 _PYTHON_TAG_RE = re.compile(r"<\|python_tag\|>.*", re.DOTALL)
-_BARE_TOOL_JSON_RE = re.compile(r'^\s*\{[^{}]*"name"\s*:[^{}]*"arguments"\s*:', re.DOTALL)
+# Matches various tool-call JSON formats that small models embed in text content
+_BARE_TOOL_JSON_RE = re.compile(
+    r'^\s*\{\s*"(?:type"\s*:\s*"function"|name"\s*:)',
+    re.DOTALL,
+)
+# Matches a bare snake_case tool name on a line by itself, e.g. "Escalate_to_human"
+_BARE_TOOL_NAME_RE = re.compile(
+    r'^\s*[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\s*$'
+)
+# Matches role-label prefixes the model sometimes injects: "User:", "Assistant:"
+_ROLE_LABEL_RE = re.compile(
+    r'^(User|Assistant|Human|Bot)\s*:\s*',
+    re.IGNORECASE,
+)
+
+# Known tool names (lower-cased for case-insensitive matching)
+_KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
+    "escalate_to_human", "search_banking_knowledge", "vector_search",
+    "web_search", "calculate", "calculator", "get_current_time",
+    "get_datetime", "get_current_datetime",
+})
 
 
 def _strip_tool_artifacts(text: str) -> str:
-    """Remove Llama 3.x internal tool-call markup from text content."""
+    """Remove Llama 3.x internal tool-call markup and leaked tool/role labels."""
     if not text:
         return text
+    # Strip <|python_tag|> … markers
     stripped, n = _PYTHON_TAG_RE.subn("", text)
     if n:
-        text = stripped.strip()  # only strip whitespace when tag was removed
+        text = stripped.strip()
+    # Entire content is a tool-call JSON blob
     if _BARE_TOOL_JSON_RE.match(text):
         return ""
+    # Entire content is just a bare tool name (e.g. "Escalate_to_human")
+    if _BARE_TOOL_NAME_RE.match(text) and text.strip().lower() in _KNOWN_TOOL_NAMES:
+        return ""
+    # Strip role-label lines and fake dialogue transcript turns
+    lines = text.split("\n")
+    cleaned: list[str] = []
+    skip_rest = False  # once we see a role label mid-response, drop everything after
+    for line in lines:
+        if _ROLE_LABEL_RE.match(line):
+            skip_rest = True
+        if skip_rest:
+            continue
+        cleaned.append(line)
+    text = "\n".join(cleaned).rstrip()
     return text
+
+
+def _try_recover_tool_call_from_text(text: str) -> dict | None:
+    """
+    Some Ollama models emit tool calls as plain JSON text instead of using the
+    proper tool_calls API field.  This function attempts to parse that JSON and
+    return a normalised tool-call dict so the executor can handle it correctly.
+
+    Returns None if the text is not a recognisable tool-call payload.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+    # Normalise: support {name, parameters}, {name, arguments},
+    # and {type, function: {name, arguments}} wrapper formats.
+    name: str = ""
+    args: Any = {}
+    if "function" in data and isinstance(data["function"], dict):
+        name = data["function"].get("name", "")
+        args = data["function"].get("arguments", {})
+    else:
+        name = data.get("name", "")
+        args = data.get("parameters") or data.get("arguments") or {}
+
+    if not name:
+        return None
+
+    return {
+        "id": f"call_{name}_{abs(hash(stripped)) % 10**8}",
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args),
+        },
+    }
 
 
 # ── LLM call helper ────────────────────────────────────────────────────────
@@ -378,6 +454,10 @@ async def run_agent_loop(
         # ── 9. Emit state snapshot (AI SDK 2: part, type "state") ──────
         yield data_part("state", memory.get_state())
 
+        # Force text-only on next iteration after a successful tool round
+        if not error_flags_sse["has_unregistered"]:
+            tools_schema = None
+
         # If any tool was hallucinated, strip tool schema so LLM must answer in text
         if error_flags_sse["has_unregistered"]:
             consecutive_tool_errors += 1
@@ -411,8 +491,7 @@ async def run_agent_loop_with_emitter(
     emit_fn: Callable[[str, Any], Awaitable[None]],
     profile_name: str = "banking",
     context: dict | None = None,
-    session_state: dict | None = None,
-) -> None:
+    session_state: dict | None = None,    suggested_actions: list[dict] | None = None,) -> None:
     """
     Same plan→act→observe loop as run_agent_loop, but instead of
     yielding SSE lines it calls emit_fn(event_name, payload) — the
@@ -472,6 +551,19 @@ async def run_agent_loop_with_emitter(
                     }
                     for tc in (msg.tool_calls or [])
                 ]
+
+                # Recovery: Ollama small models sometimes place the tool call as
+                # plain JSON text in msg.content instead of msg.tool_calls.
+                if not raw_tool_calls and text_content:
+                    recovered = _try_recover_tool_call_from_text(text_content)
+                    if recovered:
+                        logger.debug(
+                            "[%s] recovered tool call from text content: %s",
+                            conversation_id, recovered["function"]["name"]
+                        )
+                        raw_tool_calls = [recovered]
+                        text_content = ""  # suppress raw JSON from user view
+
                 # Emit text now if the model gave text AND tool calls together
                 if text_content:
                     await emit_fn("thinking_end", {})
@@ -545,7 +637,17 @@ async def run_agent_loop_with_emitter(
             step_parts.append({"toolCallId": tool_call_id, "result": result})
 
         memory.add_step(step_parts)
-        await emit_fn("state", memory.get_state())
+        # Emit inner state without suggested_actions — chips are delivered
+        # exclusively in the finish payload to avoid stale-chip race conditions.
+        _inner_state = {k: v for k, v in memory.get_state().items() if k != "suggested_actions"}
+        await emit_fn("state", _inner_state)
+
+        # ── Force text-only on next iteration ─────────────────────────
+        # Small models (llama3.2:3b) tend to re-call tools repeatedly instead
+        # of synthesising an answer.  Clearing the schema after the first
+        # successful tool round guarantees the LLM must respond in plain text.
+        if not error_flags["has_unregistered"]:
+            tools_schema = None
 
         # If any tool was hallucinated, remove tool schema so the LLM is
         # forced to respond in plain text on the next (final) iteration.
@@ -561,7 +663,7 @@ async def run_agent_loop_with_emitter(
                 })
                 break
 
-    # Emit finish
+    # Emit finish — include suggested_actions so frontend chips update atomically
     await emit_fn("thinking_end", {})
     await emit_fn("finish", {
         "finishReason": "stop",
@@ -569,4 +671,60 @@ async def run_agent_loop_with_emitter(
             "promptTokens": prompt_tokens_total,
             "completionTokens": completion_tokens_total,
         },
+        "suggestedActions": suggested_actions or [],
+    })
+
+
+# ── Re-explain loop (Socket.IO) ────────────────────────────────────────────
+
+async def run_reexplain_loop_with_emitter(
+    user_message: str,
+    last_bot_response: str,
+    conversation_id: str,
+    memory: AgentMemory,
+    emit_fn: Callable[[str, Any], Awaitable[None]],
+    suggested_actions: list[dict] | None = None,
+) -> None:
+    """
+    Handle "I didn't understand" / clarification requests.
+
+    Calls the LLM once with a special re-explain prompt — no tools,
+    just a reformatted version of the previous response.
+    """
+    await emit_fn("thinking_start", {})
+
+    system_prompt = build_reexplain_prompt(
+        user_message=user_message,
+        last_bot_response=last_bot_response,
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        # Include recent conversation history for context
+        *[m for m in memory.get_messages() if m.get("role") in ("user", "assistant")][-6:],
+    ]
+
+    try:
+        text_content, _, usage = await _stream_llm_with_emitter(
+            messages=messages,
+            tools_schema=None,
+            temperature=0.4,
+            emit_fn=emit_fn,
+        )
+    except Exception as exc:
+        logger.error("[%s] Re-explain LLM call failed: %s", conversation_id, exc)
+        await emit_fn("error", {"message": "I'm having trouble rephrasing that. Please try asking again."})
+        return
+
+    memory.add_user_message(user_message)
+    memory.add_assistant_message(content=text_content or None)
+
+    await emit_fn("thinking_end", {})
+    await emit_fn("finish", {
+        "finishReason": "stop",
+        "usage": {
+            "promptTokens": usage.get("prompt_tokens", 0),
+            "completionTokens": usage.get("completion_tokens", 0),
+        },
+        "suggestedActions": suggested_actions or [],
     })

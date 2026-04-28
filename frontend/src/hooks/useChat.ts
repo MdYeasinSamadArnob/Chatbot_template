@@ -74,8 +74,12 @@ export function useChat(conversationId?: string) {
     });
 
     socketClient.on("state", (data) => {
-      // State update from backend — cast safely
-      store.updateSessionState(data as any);
+      // Extract suggested_actions before passing the rest to session state
+      const { suggested_actions, ...sessionData } = data as any;
+      store.updateSessionState(sessionData as any);
+      if (Array.isArray(suggested_actions)) {
+        store.setSuggestedActions(suggested_actions);
+      }
     });
 
     socketClient.on("error", ({ message }) => {
@@ -85,11 +89,17 @@ export function useChat(conversationId?: string) {
       isProcessingRef.current = false;
     });
 
-    socketClient.on("finish", () => {
+    socketClient.on("finish", (data?: { suggestedActions?: unknown }) => {
       store.removeThinking();
       store.finishStreaming();
       store.setProcessing(false);
       isProcessingRef.current = false;
+      // Update quick-reply chips — delivered here to guarantee they reflect
+      // the current intent and are never overwritten by stale mid-loop state.
+      const chips = (data as any)?.suggestedActions;
+      if (Array.isArray(chips)) {
+        store.setSuggestedActions(chips);
+      }
     });
 
     socketClient.on("conversation_reset", () => {

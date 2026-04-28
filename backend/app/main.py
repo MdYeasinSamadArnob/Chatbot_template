@@ -23,6 +23,7 @@ import socketio
 
 # ── Tool auto-registration (must happen before router or sio is used) ─────
 import app.tools  # noqa: F401
+import app.tools.escalate_tool  # noqa: F401 — registers escalate_to_human
 
 from app.api.chat import router as chat_router
 from app.api.socket_handlers import sio

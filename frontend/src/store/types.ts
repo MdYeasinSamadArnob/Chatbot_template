@@ -43,7 +43,12 @@ export type ChatMessage =
   | AgentTextMessage
   | ToolCallMessage
   | ThinkingMessage;
+// ── Quick replies ─────────────────────────────────────────────────────────────
 
+export interface SuggestedAction {
+  label: string;
+  value: string;
+}
 // ── Connection state ───────────────────────────────────────────────────────
 
 export type ConnectionStatus = "connected" | "disconnected" | "reconnecting";
@@ -77,6 +82,8 @@ export interface ChatStore {
   sessionState: SessionState;
   errorMessages: string[];
   connectionStatus: ConnectionStatus;
+  /** Quick-reply chips driven by the backend. Cleared when user sends a message. */
+  suggestedActions: SuggestedAction[];
 
   // Actions
   addUserMessage: (text: string) => void;
@@ -92,5 +99,6 @@ export interface ChatStore {
   setConnectionStatus: (status: ConnectionStatus) => void;
   loadHistory: (messages: Array<{ role: string; content: string }>) => void;
   resetConversation: () => void;
+  setSuggestedActions: (actions: SuggestedAction[]) => void;
 }
 

@@ -1,10 +1,10 @@
-# DB repository functions for conversations, messages, session state
-from .models import Conversation, Message, SessionState
+# DB repository functions for conversations, messages, session state, escalations
+from .models import Conversation, Message, SessionState, EscalationTicket, BankingKnowledge
 from sqlalchemy.future import select
 from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import uuid
 
 async def ensure_conversation(session: AsyncSession, conversation_id: str) -> None:
@@ -58,3 +58,76 @@ async def load_session_state(session: AsyncSession, conversation_id: str) -> Dic
     )
     row = result.scalar_one_or_none()
     return row.state if row else {}
+
+
+# ── Escalation tickets ─────────────────────────────────────────────────────
+
+async def create_escalation_ticket(
+    session: AsyncSession,
+    ticket_id: str,
+    conversation_id: str,
+    reason: str,
+    category: str = "general",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert a new escalation ticket."""
+    ticket = EscalationTicket(
+        ticket_id=ticket_id,
+        conversation_id=conversation_id,
+        reason=reason,
+        category=category,
+        status="open",
+        metadata_=metadata or {},
+    )
+    session.add(ticket)
+    await session.commit()
+
+
+async def list_escalation_tickets(
+    session: AsyncSession,
+    status: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """List escalation tickets, optionally filtered by status."""
+    query = select(EscalationTicket).order_by(EscalationTicket.created_at.desc()).limit(limit)
+    if status:
+        query = query.where(EscalationTicket.status == status)
+    result = await session.execute(query)
+    rows = result.scalars().all()
+    return [
+        {
+            "ticket_id": r.ticket_id,
+            "conversation_id": str(r.conversation_id),
+            "reason": r.reason,
+            "category": r.category,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+# ── Knowledge base ─────────────────────────────────────────────────────────
+
+async def upsert_knowledge_chunk(
+    session: AsyncSession,
+    title: str,
+    content: str,
+    embedding: List[float],
+    image_urls: Optional[List[str]] = None,
+    source_url: Optional[str] = None,
+) -> int:
+    """Insert or update a BankingKnowledge chunk. Returns the row id."""
+    from .models import BankingKnowledge
+    chunk = BankingKnowledge(
+        title=title,
+        content=content,
+        image_urls=image_urls or [],
+        chunk_embedding=embedding,
+        source_url=source_url or "",
+    )
+    session.add(chunk)
+    await session.flush()  # get the auto-incremented id
+    await session.commit()
+    return chunk.id
+

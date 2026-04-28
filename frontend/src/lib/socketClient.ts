@@ -12,7 +12,7 @@ import { io, Socket } from "socket.io-client";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ??
-  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8000` : "http://localhost:8000");
+  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:9001` : "http://localhost:9001");
 
 type EmitEvents = {
   chat_message: { message: string; conversation_id: string; profile?: string };

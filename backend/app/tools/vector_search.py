@@ -52,6 +52,10 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
         async with AsyncSessionLocal() as session:
             stmt = (
                 select(BankingKnowledge)
+                .where(
+                    BankingKnowledge.is_active == True,
+                    BankingKnowledge.chunk_embedding.cosine_distance(embedding) < 0.40,
+                )
                 .order_by(BankingKnowledge.chunk_embedding.cosine_distance(embedding))
                 .limit(args.top_k)
             )
@@ -65,6 +69,31 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
         )
 
     if not rows:
+        # Fallback: keyword search when no vector matches found
+        try:
+            from app.db.connection import AsyncSessionLocal
+            from app.db.models import BankingKnowledge
+            from sqlalchemy import or_, func as sqlfunc
+
+            async with AsyncSessionLocal() as session:
+                words = [w for w in args.query.split() if len(w) > 2]
+                fallback_stmt = (
+                    select(BankingKnowledge)
+                    .where(
+                        BankingKnowledge.is_active == True,
+                        or_(*(
+                            BankingKnowledge.content_text.ilike(f"%{w}%")
+                            for w in words[:5]
+                        ))
+                    )
+                    .limit(args.top_k)
+                )
+                fb_result = await session.execute(fallback_stmt)
+                rows = fb_result.scalars().all()
+        except Exception:
+            pass
+
+    if not rows:
         return (
             "No specific articles found in the knowledge base for this query. "
             "Please answer using your general banking knowledge."
@@ -72,11 +101,15 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
 
     out = []
     for row in rows:
-        chunk = f"**{row.title}**\n\n{row.content.strip()}"
+        title = row.document_title or "Banking Article"
+        content = (row.content_text or "").strip()
+        chunk = f"**{title}**\n\n{content}"
         if row.image_urls:
             for url in row.image_urls:
                 chunk += f"\n\n![Step screenshot]({url})"
         if row.source_url:
             chunk += f"\n\n[Learn more]({row.source_url})"
         out.append(chunk)
-    return "\n\n---\n\n".join(out)
+    result_count = len(out)
+    header = f"Found {result_count} relevant article{'s' if result_count != 1 else ''} from the knowledge base:\n\n"
+    return header + "\n\n---\n\n".join(out)

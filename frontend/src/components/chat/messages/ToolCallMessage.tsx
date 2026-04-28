@@ -1,6 +1,6 @@
 "use client";
 
-import { Search, FileText, Clock } from "lucide-react";
+import { Search, FileText, Clock, Users, Globe, Calculator } from "lucide-react";
 import type { ToolCallMessage as ToolCallMessageType } from "@/store/types";
 
 interface Props {
@@ -11,21 +11,45 @@ interface Props {
 const TOOL_LABELS: Record<string, { icon: React.ReactNode; text: string }> = {
   search_banking_knowledge: {
     icon: <Search size={13} className="text-[#1A56DB]" />,
-    text: "Searching our knowledge base…",
+    text: "Checking our knowledge base…",
+  },
+  vector_search: {
+    icon: <Search size={13} className="text-[#1A56DB]" />,
+    text: "Searching for relevant information…",
+  },
+  escalate_to_human: {
+    icon: <Users size={13} className="text-[#1A56DB]" />,
+    text: "Connecting you with our support team…",
+  },
+  web_search: {
+    icon: <Globe size={13} className="text-[#1A56DB]" />,
+    text: "Looking up the latest information…",
   },
   calculate: {
-    icon: <FileText size={13} className="text-[#1A56DB]" />,
+    icon: <Calculator size={13} className="text-[#1A56DB]" />,
+    text: "Calculating…",
+  },
+  calculator: {
+    icon: <Calculator size={13} className="text-[#1A56DB]" />,
     text: "Calculating…",
   },
   get_current_time: {
     icon: <Clock size={13} className="text-[#1A56DB]" />,
-    text: "Checking the time…",
+    text: "Checking current date and time…",
+  },
+  get_datetime: {
+    icon: <Clock size={13} className="text-[#1A56DB]" />,
+    text: "Checking current date and time…",
+  },
+  get_current_datetime: {
+    icon: <Clock size={13} className="text-[#1A56DB]" />,
+    text: "Checking current date and time…",
   },
 };
 
 const DEFAULT_LABEL = {
   icon: <Search size={13} className="text-[#1A56DB]" />,
-  text: "Looking that up for you…",
+  text: "Retrieving information for you…",
 };
 
 /**

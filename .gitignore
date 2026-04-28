@@ -41,6 +41,10 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 frontend/.turbo/
+frontend_editor/node_modules/
+frontend_editor/.next/
+frontend_editor/out/
+frontend_editor/.turbo/
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 docker-compose.override.yml

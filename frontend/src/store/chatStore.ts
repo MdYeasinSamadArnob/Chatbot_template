@@ -9,6 +9,7 @@ import type {
   ChatStore,
   ConnectionStatus,
   SessionState,
+  SuggestedAction,
   ToolCallMessage,
   UserTextMessage,
   ThinkingMessage,
@@ -30,6 +31,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sessionState: defaultSessionState(),
   errorMessages: [],
   connectionStatus: "disconnected",
+  suggestedActions: [],
 
   // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -41,7 +43,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         text,
         timestamp: Date.now(),
       };
-      return { messages: [...state.messages, msg], errorMessages: [] };
+      // Clear quick-replies when user sends a message
+      return { messages: [...state.messages, msg], errorMessages: [], suggestedActions: [] };
     }),
 
   addAgentTextDelta: (delta: string) =>
@@ -156,5 +159,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       conversationId: crypto.randomUUID(),
       sessionState: defaultSessionState(),
       errorMessages: [],
+      suggestedActions: [],
     }),
+
+  setSuggestedActions: (actions: SuggestedAction[]) =>
+    set({ suggestedActions: actions }),
 }));
