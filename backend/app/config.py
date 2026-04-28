@@ -40,6 +40,19 @@ class Settings(BaseSettings):
 
     # ── Embeddings ───────────────────────────────────────────────────────
     embedding_model: str = "nomic-embed-text"
+    embedding_dims: int = 1024
+
+    # ── Admin ───────────────────────────────────────────────────────────
+    admin_secret: str = ""
+
+    # ── LLM thinking mode (Qwen3 / extended-reasoning models) ───────────
+    # Set to False to disable chain-of-thought / thinking tokens.
+    llm_thinking: bool = False
+
+    # ── Optional separate model for intent classification ───────────────
+    # Leave empty to use model_name. Set to a small/fast model (e.g. llama3.2:3b)
+    # to keep the main model for high-quality responses.
+    classifier_model: str = ""
 
     # ── Banking branding ─────────────────────────────────────────────────
     bank_name: str = "MyBank"

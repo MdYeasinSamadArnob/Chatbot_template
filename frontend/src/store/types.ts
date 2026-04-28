@@ -28,6 +28,8 @@ export interface AgentTextMessage extends BaseMessage {
 export interface ToolCallMessage extends BaseMessage {
   type: "tool_call";
   toolCallId: string;
+  /** Human-readable text to show while the tool is running. */
+  announcement?: string;
   toolName: string;
   args: Record<string, unknown>;
   result?: string;
@@ -89,7 +91,7 @@ export interface ChatStore {
   addUserMessage: (text: string) => void;
   addAgentTextDelta: (delta: string) => void;
   finishStreaming: () => void;
-  toolCallStart: (toolCallId: string, toolName: string, args: Record<string, unknown>) => void;
+  toolCallStart: (toolCallId: string, toolName: string, args: Record<string, unknown>, announcement?: string) => void;
   toolCallEnd: (toolCallId: string, result: string) => void;
   updateSessionState: (state: SessionState) => void;
   setProcessing: (processing: boolean) => void;

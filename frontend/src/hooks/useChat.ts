@@ -65,8 +65,8 @@ export function useChat(conversationId?: string) {
       store.addAgentTextDelta(delta);
     });
 
-    socketClient.on("tool_call", ({ toolCallId, toolName, args }) => {
-      store.toolCallStart(toolCallId, toolName, args);
+    socketClient.on("tool_call", ({ toolCallId, toolName, args, announcement }) => {
+      store.toolCallStart(toolCallId, toolName, args, announcement);
     });
 
     socketClient.on("tool_result", ({ toolCallId, result }) => {
@@ -106,6 +106,13 @@ export function useChat(conversationId?: string) {
       store.resetConversation();
     });
 
+    // chips_update: mid-stream chip push from background classify task
+    socketClient.on("chips_update", (data) => {
+      if (Array.isArray(data?.suggestedActions)) {
+        store.setSuggestedActions(data.suggestedActions);
+      }
+    });
+
     // ── Connect ──────────────────────────────────────────────────────
     socketClient.connect(effectiveConversationId);
 
@@ -124,6 +131,7 @@ export function useChat(conversationId?: string) {
       socketClient.off("state");
       socketClient.off("error");
       socketClient.off("finish");
+      socketClient.off("chips_update");
       socketClient.off("conversation_reset");
       socketClient.disconnect();
     };

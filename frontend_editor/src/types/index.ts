@@ -9,6 +9,8 @@ export interface KBDocument {
   version: number;
   author?: string | null;
   is_published: boolean;
+  embedding_status?: "pending" | "processing" | "ready" | "failed" | null;
+  embedded_at?: string | null;
   created_at: string;
   updated_at: string;
   // Joined from knowledge_chunks (first chunk)

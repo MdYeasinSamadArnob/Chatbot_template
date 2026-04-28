@@ -84,7 +84,7 @@ export function AgentMessage({ message }: Props) {
       </div>
 
       {/* Message bubble */}
-      <div className="max-w-[85%] bg-white border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-gray-800 shadow-sm">
+      <div className="max-w-[88%] md:max-w-[72%] xl:max-w-[680px] bg-white border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-gray-800 shadow-sm">
         <div className="agent-markdown">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}

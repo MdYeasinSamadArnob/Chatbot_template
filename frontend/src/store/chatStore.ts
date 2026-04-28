@@ -78,7 +78,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ),
     })),
 
-  toolCallStart: (toolCallId, toolName, args) =>
+  toolCallStart: (toolCallId, toolName, args, announcement?) =>
     set((state) => {
       const msg: ToolCallMessage = {
         id: toolCallId,
@@ -86,6 +86,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         toolCallId,
         toolName,
         args,
+        announcement,
         status: "running",
         timestamp: Date.now(),
       };

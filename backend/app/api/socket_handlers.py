@@ -14,7 +14,8 @@ Events emitted to client:
     tool_call             — { toolCallId, toolName, args }
     tool_result           — { toolCallId, result }
     state                 — { todos, notes, context, suggested_actions?, ... }
-    finish                — { finishReason, usage }
+    finish                — { finishReason, usage, suggestedActions }
+    chips_update          — { suggestedActions: [{label, value}] }
     error                 — { message: str }
     conversation_reset    — { conversation_id }
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 import socketio
@@ -57,6 +59,18 @@ _conversation_locks: dict[str, asyncio.Lock] = {}
 
 # Simple PII patterns to redact from logs (not from LLM input — user chose to share)
 _PII_LOG_RE = re.compile(r"\b\d{13,19}\b|\b\d{4}[\s\-]\d{4}[\s\-]\d{4}[\s\-]\d{4}\b")
+
+# Detects yes/no question tails in streamed answers for chip generation
+_YN_QUESTION_RE = re.compile(
+    r"\b(would you like|do you (want|need)|shall i|is there anything (else|more)|"
+    r"can i (help|assist)|need (more|further)|want to know more|would you also)\b",
+    re.IGNORECASE,
+)
+
+
+def _redact_pii(text: str) -> str:
+    """Replace card/account numbers in log strings with ***."""
+    return _PII_LOG_RE.sub("***", text)
 
 
 def _get_lock(conversation_id: str) -> asyncio.Lock:
@@ -159,6 +173,8 @@ async def chat_message(sid: str, data: dict[str, Any]) -> None:
         await sio.emit("error", {"message": "No conversation_id provided."}, to=sid)
         return
 
+    logger.info("chat_message sid=%s conv=%s msg=%r", sid, conversation_id, _redact_pii(raw_message[:120]))
+
     # Prevent concurrent loops for the same conversation
     lock = _get_lock(conversation_id)
     if lock.locked():
@@ -187,6 +203,76 @@ async def chat_message(sid: str, data: dict[str, Any]) -> None:
             await sio.emit("error", {"message": f"Internal server error: {exc}"}, to=sid)
 
 
+# ── KB pre-fetch helper ────────────────────────────────────────────────────
+
+async def _prefetch_kb(query: str) -> tuple[str, float]:
+    """
+    Pre-fetch knowledge base context in parallel with intent classification.
+    Returns (context_text, confidence_score).
+    Confidence: 0.8 = strong (2+ results), 0.55 = partial (1 result),
+                0.4 = keyword fallback, 0.0 = no match / error.
+    """
+    try:
+        from app.tools.vector_search import search_banking_knowledge, VectorSearchInput
+        result = await search_banking_knowledge(VectorSearchInput(query=query, top_k=3))
+        if not result or "unavailable" in result.lower() or "No specific articles" in result:
+            return "", 0.0
+        # Estimate confidence from KB response content
+        match = re.search(r"Found (\d+) relevant", result)
+        if match:
+            n = int(match.group(1))
+            confidence = 0.8 if n >= 2 else 0.55
+        else:
+            # Keyword-fallback response (no "Found N" header) — lower confidence
+            confidence = 0.4
+        logger.debug("[KB prefetch] confidence=%.2f result_len=%d", confidence, len(result))
+        return result, confidence
+    except Exception as exc:
+        logger.warning("KB prefetch failed: %s", exc)
+        return "", 0.0
+
+
+# ── Chip builder helper ────────────────────────────────────────────────────
+
+def _build_chips(classification, answer_tail: str = "") -> list[dict]:
+    """
+    Build quick-reply chips from:
+      1. Yes/No detection on last 200 chars of answer
+      2. next_likely intent chips (LLM-predicted follow-ups)
+      3. Current intent's suggested_actions
+    Deduplicates by 'value', caps at 6.
+    """
+    from app.agent.intent_taxonomy import INTENTS
+    chips: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(chip: dict) -> None:
+        v = str(chip.get("value", ""))
+        if v and v not in seen:
+            seen.add(v)
+            chips.append(chip)
+
+    # 1. Yes/No chips when answer tail ends with a relevant question
+    tail = answer_tail.strip()[-200:] if answer_tail else ""
+    if tail.endswith("?") and _YN_QUESTION_RE.search(tail):
+        _add({"label": "Yes, please", "value": "Yes, please"})
+        _add({"label": "No, that's all", "value": "No, that's all I need"})
+
+    # 2. Predictive chips from next_likely (LLM-generated per-message)
+    for intent_name in (getattr(classification, "next_likely", None) or [])[:2]:
+        intent_def = INTENTS.get(intent_name)
+        if intent_def and intent_def.suggested_actions:
+            _add(intent_def.suggested_actions[0])
+
+    # 3. Current intent chips
+    for chip in (classification.suggested_actions or []):
+        _add(chip)
+        if len(chips) >= 6:
+            break
+
+    return chips[:6]
+
+
 async def _route_message(
     raw_message: str,
     conversation_id: str,
@@ -198,6 +284,16 @@ async def _route_message(
 ) -> None:
     """
     Routing decision tree. Mutates memory.session_state in-place.
+
+    Performance path:
+      1. Active flow check (sync, <1ms) — handles own thinking_start
+      2. Emit thinking_start IMMEDIATELY (<100ms) — visible feedback before LLM
+      3. Fire classify_task + kb_task in parallel
+      4. Await classify_task; kb_task completes concurrently
+      5. Clarification / flow-activation routing
+      6. Inject KB into context with confidence gating
+      7. Run agent loop (no extra tool-decision call when KB is strong)
+      8. Emit finish with final chips
     """
     from app.agent.intent_classifier import (
         classify_intent,
@@ -213,13 +309,14 @@ async def _route_message(
 
     current_state = memory.get_state()
 
-    # ── Track negative sentiment ─────────────────────────────────────
+    # ── Track negative sentiment (sync, fast) ─────────────────────────
     if detect_negative_sentiment(raw_message):
         neg_count = int(current_state.get("_negative_sentiment_count", 0)) + 1
         current_state["_negative_sentiment_count"] = neg_count
         memory.update_state(current_state)
 
-    # ── 1. Active flow? ───────────────────────────────────────────────
+    # ── 1. Active flow? (sync, no LLM needed) ────────────────────────
+    # Must run BEFORE thinking_start — flow handler manages its own thinking lifecycle.
     engine = FlowEngine.from_session(current_state)
     if engine:
         await _handle_flow(
@@ -233,9 +330,51 @@ async def _route_message(
         )
         return
 
-    # ── 2. Clarification request? ─────────────────────────────────────
+    # ── INSTANT: emit thinking_start <100ms ──────────────────────────
+    # Fires before any LLM calls so user sees feedback immediately.
+    await emit_fn("thinking_start", {})
+
+    # ── 2. Fire parallel tasks ────────────────────────────────────────
+    route_started = time.perf_counter()
+    is_first = len([m for m in memory.get_messages() if m.get("role") == "user"]) == 0
+    classify_task: asyncio.Task = asyncio.create_task(
+        classify_intent(
+            message=raw_message,
+            conversation_history=memory.get_messages(),
+            is_first_message=is_first,
+        )
+    )
+    kb_task: asyncio.Task = asyncio.create_task(_prefetch_kb(raw_message))
+
+    # ── 3. Await classification (kb_task runs concurrently) ───────────
+    classify_wait_started = time.perf_counter()
+    try:
+        classification = await classify_task
+    except Exception as exc:
+        logger.warning("Intent classification failed: %s — defaulting to general_faq", exc)
+        kb_task.cancel()
+        from app.agent.intent_classifier import ClassificationResult
+        from app.agent.intent_taxonomy import FALLBACK_INTENT
+        intent_def = FALLBACK_INTENT
+        classification = ClassificationResult(
+            intent="general_faq", confidence=0.4,
+            is_clarification=False, is_abort=False, is_negative_sentiment=False,
+            suggested_profile=intent_def.profile, flow_name=None,
+            required_slots=[], suggested_actions=intent_def.suggested_actions,
+        )
+    classify_wait_ms = (time.perf_counter() - classify_wait_started) * 1000
+    logger.info(
+        "[%s] classify_intent wait=%.0f ms intent=%s confidence=%.2f",
+        conversation_id,
+        classify_wait_ms,
+        classification.intent,
+        classification.confidence,
+    )
+
+    # ── 4. Clarification request? ─────────────────────────────────────
     last_bot = _get_last_bot_message(memory)
     if last_bot and detect_clarification(raw_message, last_bot):
+        kb_task.cancel()
         clarif_count = int(current_state.get("_clarification_count", 0)) + 1
         current_state["_clarification_count"] = clarif_count
         memory.update_state(current_state)
@@ -246,11 +385,11 @@ async def _route_message(
             conversation_id=conversation_id,
             memory=memory,
             emit_fn=emit_fn,
-            # Keep chips contextual even for re-explain turns
-            suggested_actions=classification.suggested_actions if 'classification' in dir() else [],
+            suggested_actions=classification.suggested_actions,
+            skip_initial_thinking=True,  # already emitted at top
         )
 
-        # After re-explanation, offer escalation if this is the 2nd clarification
+        # After 2nd clarification, offer human escalation
         if clarif_count >= 2:
             updated = memory.get_state()
             updated["suggested_actions"] = [
@@ -260,33 +399,21 @@ async def _route_message(
             await emit_fn("state", memory.get_state())
         return
 
-    # ── 3. Classify intent ────────────────────────────────────────────
-    is_first = len([m for m in memory.get_messages() if m.get("role") == "user"]) == 0
-    classification = await classify_intent(
-        message=raw_message,
-        conversation_history=memory.get_messages(),
-        is_first_message=is_first,
-    )
-
-    # Store last detected topic in session state for context injection
+    # ── 5. Store topic + check for flow activation ────────────────────
     current_state["_last_topic"] = classification.intent
     memory.update_state(current_state)
 
-    # ── 4. Flow activation? ───────────────────────────────────────────
     if classification.flow_name and classification.confidence >= 0.65:
+        kb_task.cancel()
         new_engine = FlowEngine.activate(classification.flow_name, current_state)
         memory.update_state(current_state)
 
         if new_engine:
             intro_text, first_quick_replies = new_engine.get_intro()
-            # Add user message to history first
             memory.add_user_message(raw_message)
-            # Emit thinking briefly then the first flow question
-            await emit_fn("thinking_start", {})
+            # thinking_start already emitted — just end it, then emit text
             await emit_fn("thinking_end", {})
             await emit_fn("text_delta", {"delta": intro_text})
-
-            # Deliver chips in the finish payload (consistent with all other paths)
             state_update = memory.get_state()
             state_update.pop("suggested_actions", None)
             memory.update_state(state_update)
@@ -295,19 +422,49 @@ async def _route_message(
             memory.add_assistant_message(content=intro_text)
             return
 
-    # ── 5. Normal agent loop ───────────────────────────────────────────
-    # Build enriched context for system prompt injection
+    # ── 6. Await KB result (likely already done by now) ───────────────
+    kb_wait_started = time.perf_counter()
+    try:
+        kb_context, kb_confidence = await asyncio.wait_for(kb_task, timeout=8.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        kb_context, kb_confidence = "", 0.0
+        logger.warning("[%s] KB prefetch timed out — LLM will use tools if needed", conversation_id)
+    kb_wait_ms = (time.perf_counter() - kb_wait_started) * 1000
+    logger.info(
+        "[%s] kb_prefetch wait=%.0f ms confidence=%.2f context_len=%d",
+        conversation_id,
+        kb_wait_ms,
+        kb_confidence,
+        len(kb_context),
+    )
+
+    logger.debug("[%s] KB confidence=%.2f context_len=%d", conversation_id, kb_confidence, len(kb_context))
+
+    # ── 7. Fire chip-pusher task (emits chips_update mid-stream) ─────
+    async def _push_chips_bg() -> list[dict]:
+        chips = _build_chips(classification)
+        await emit_fn("chips_update", {"suggestedActions": chips})
+        return chips
+
+    chip_task: asyncio.Task = asyncio.create_task(_push_chips_bg())
+
+    # ── 8. Build enriched context ──────────────────────────────────────
     enriched_context = dict(extra_context or {})
-    enriched_context["_last_topic"] = current_state.get("_last_topic", "")
-    enriched_context["_negative_sentiment_count"] = current_state.get("_negative_sentiment_count", 0)
-    enriched_context["_clarification_count"] = current_state.get("_clarification_count", 0)
+    enriched_context.update({
+        "_last_topic": current_state.get("_last_topic", ""),
+        "_negative_sentiment_count": current_state.get("_negative_sentiment_count", 0),
+        "_clarification_count": current_state.get("_clarification_count", 0),
+        "_kb_context": kb_context,
+        "_kb_confidence": kb_confidence,
+    })
 
     # Surface greeting quick-replies for first message
     if is_first or classification.intent == "greeting":
         current_state["suggested_actions"] = classification.suggested_actions
         memory.update_state(current_state)
 
-    await run_agent_loop_with_emitter(
+    # ── 9. Run full agent loop (tools intact, KB pre-injected if confident) ──
+    usage = await run_agent_loop_with_emitter(
         message=raw_message,
         conversation_id=conversation_id,
         memory=memory,
@@ -315,9 +472,38 @@ async def _route_message(
         profile_name=profile_name,
         context=enriched_context,
         session_state=None,  # already seeded above
-        # Chips are delivered in the finish payload — updated per response
         suggested_actions=classification.suggested_actions or [],
+        skip_initial_thinking=True,  # already emitted at step 2
     )
+    agent_loop_ms = (time.perf_counter() - route_started) * 1000 - classify_wait_ms - kb_wait_ms
+    logger.info(
+        "[%s] agent_loop approx=%.0f ms total_route=%.0f ms",
+        conversation_id,
+        max(agent_loop_ms, 0.0),
+        (time.perf_counter() - route_started) * 1000,
+    )
+
+    # ── 10. Bulletproof chip timing ───────────────────────────────────
+    # Guarantee chips always appear even if classification resolved very late.
+    if not chip_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(chip_task), timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.warning("[%s] Chip task did not complete in time", conversation_id)
+
+    # Build final chips using answer tail for yes/no detection
+    last_answer = _get_last_bot_message(memory) or ""
+    final_chips = _build_chips(classification, answer_tail=last_answer[-200:])
+
+    # ── 11. Emit finish with merged chips ─────────────────────────────
+    await emit_fn("finish", {
+        "finishReason": "stop",
+        "usage": {
+            "promptTokens": usage.get("promptTokens", 0),
+            "completionTokens": usage.get("completionTokens", 0),
+        },
+        "suggestedActions": final_chips,
+    })
 
 
 async def _handle_flow(

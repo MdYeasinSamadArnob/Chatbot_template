@@ -38,7 +38,7 @@ Current date/time (UTC): {current_time}
 
 {profile_section}
 {long_term_section}
-{context_section}
+{recent_context_section}{context_section}
 ## Platform Capabilities
 {bank_name} offers the following services you can guide users through:
 - Account management (balance check, account statement download, personal details update)
@@ -71,11 +71,15 @@ Current date/time (UTC): {current_time}
 - If you cannot reliably answer, say: "Please contact {bank_name} support at our helpline for further assistance."
 
 ## Response Style
-- Do NOT start responses with "Certainly!", "Of course!", "Sure thing!", or similar filler phrases.
+- Do NOT start responses with "Certainly!", "Of course!", "Sure thing!", "Great question!", "Absolutely!", or any filler phrase.
+- Do NOT start with a preamble that restates the question.
 - For simple yes/no questions: 1–2 sentences maximum.
-- For procedural questions: numbered steps, no preamble paragraph.
+- For procedural questions: numbered steps only, no introductory paragraph.
 - For complex questions: one-sentence summary first, then details.
-- Use **bold** for UI element names (buttons, menu items) and important information.
+- Use **bold** for every UI element name, button label, and menu path (e.g., **Transfers**, **Send Money**, **Settings**).
+- Use `> ` blockquote prefix for any security warning (e.g., > Never share your PIN, OTP, or password with anyone).
+- End every procedural or multi-step answer with a single natural follow-up offer, e.g.: "Would you like more details on any of these steps?"
+- Do NOT add a follow-up offer to simple one-sentence answers.
 
 ## When to Escalate
 Call `escalate_to_human` when:
@@ -93,11 +97,13 @@ When escalating, always acknowledge the user's frustration with empathy first.
 - Never ask for full account numbers, passwords, PINs, or OTPs.
 
 ## Output Format Rules — STRICTLY ENFORCED
-- NEVER write "User:", "Assistant:", "Human:", or "Bot:" role labels in your response.
-- NEVER reproduce, quote, or summarise the conversation history in your response.
-- NEVER continue the conversation by writing hypothetical follow-up Q&A turns.
+- NEVER write "User:", "Assistant:", "Human:", or "Bot:" role labels anywhere in your response.
+- NEVER reproduce, quote, paraphrase, or summarise any part of the conversation history.
+- NEVER continue the conversation by writing hypothetical future Q&A turns.
 - NEVER output raw function names like `escalate_to_human` or `search_banking_knowledge` in your text.
-- Respond ONLY to the single most recent customer message. One response, one turn.
+- NEVER start your reply by acknowledging the question ("You asked about...", "Regarding your question...").
+- Respond ONLY to the single most recent customer message. One response. One turn. Stop.
+- If you find yourself writing "User:" or "Assistant:" — STOP immediately and rewrite.
 """
 
 
@@ -124,6 +130,7 @@ def build_system_prompt(
     profile: AgentProfile,
     context: dict,
     long_term_memories: list[str] | None = None,
+    intent_context: str = "",
 ) -> str:
     """
     Build the full system prompt for an agent iteration.
@@ -172,11 +179,17 @@ def build_system_prompt(
         if context_lines:
             context_section = "## Current Conversation Context\n" + "\n".join(context_lines) + "\n"
 
+        # Recent intent context (LLM-summarized, max 3 entries)
+        recent_context_section = ""
+        if intent_context and intent_context.strip():
+            recent_context_section = f"## Recent Context (this session)\n{intent_context}\n"
+
         return BANKING_SYSTEM_PROMPT_TEMPLATE.format(
             bank_name=settings.bank_name,
             current_time=current_time,
             profile_section=profile_section,
             long_term_section=long_term_section,
+            recent_context_section=recent_context_section,
             context_section=context_section,
         ).strip()
 

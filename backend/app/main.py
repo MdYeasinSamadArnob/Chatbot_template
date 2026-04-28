@@ -26,6 +26,7 @@ import app.tools  # noqa: F401
 import app.tools.escalate_tool  # noqa: F401 — registers escalate_to_human
 
 from app.api.chat import router as chat_router
+from app.api.kb import router as kb_router
 from app.api.socket_handlers import sio
 from app.config import settings
 
@@ -55,6 +56,7 @@ _fastapi_app.add_middleware(
 )
 
 _fastapi_app.include_router(chat_router)
+_fastapi_app.include_router(kb_router)
 
 
 @_fastapi_app.on_event("startup")

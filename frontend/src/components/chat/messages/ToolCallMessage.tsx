@@ -61,7 +61,9 @@ export function ToolCallMessage({ message }: Props) {
   // Only render while running — done/error messages are removed by the store
   if (message.status !== "running") return null;
 
+  // Use the backend-provided announcement text if available, otherwise fall back to label map
   const label = TOOL_LABELS[message.toolName] ?? DEFAULT_LABEL;
+  const displayText = message.announcement ?? label.text;
 
   return (
     <div className="flex items-start gap-2.5 px-4 py-1">
@@ -75,7 +77,7 @@ export function ToolCallMessage({ message }: Props) {
         <span className="thinking-dot w-1.5 h-1.5 rounded-full bg-[#1A56DB] inline-block opacity-40" />
         <span className="thinking-dot w-1.5 h-1.5 rounded-full bg-[#1A56DB] inline-block opacity-40" />
         <span className="thinking-dot w-1.5 h-1.5 rounded-full bg-[#1A56DB] inline-block opacity-40" />
-        <span className="text-sm text-gray-500 ml-1">{label.text}</span>
+        <span className="text-sm text-gray-500 ml-1">{displayText}</span>
       </div>
     </div>
   );

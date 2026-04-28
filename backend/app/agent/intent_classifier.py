@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -76,6 +77,7 @@ class ClassificationResult:
     flow_name: Optional[str]
     required_slots: list[str]
     suggested_actions: list[dict] = field(default_factory=list)
+    next_likely: list[str] = field(default_factory=list)
 
 
 # ── Fast detectors (no LLM) ────────────────────────────────────────────────
@@ -108,8 +110,6 @@ def detect_negative_sentiment(message: str) -> bool:
     return bool(_NEGATIVE_SENTIMENT_RE.search(message))
 
 
-# ── LLM-based classifier ───────────────────────────────────────────────────
-
 async def classify_intent(
     message: str,
     conversation_history: list[dict],
@@ -121,10 +121,10 @@ async def classify_intent(
     - No tools, temperature=0, single shot.
     - Falls back to 'general_faq' on any LLM or parse error.
     - Greetings are detected by regex to avoid LLM latency.
+    - Intent routing stays dynamic via the classifier LLM.
     """
     msg = message.strip()
 
-    # ── Fast path: greeting detection ─────────────────────────────────
     if is_first_message and _GREETING_RE.match(msg):
         intent_def = INTENTS["greeting"]
         return ClassificationResult(
@@ -139,15 +139,16 @@ async def classify_intent(
             suggested_actions=intent_def.suggested_actions,
         )
 
-    # ── Build classifier prompt ────────────────────────────────────────
     intent_list_lines = "\n".join(
         f'- "{name}": {defn.description}'
         for name, defn in INTENTS.items()
     )
 
-    # Include last 2 exchange pairs for context (4 messages max)
     recent_turns: list[str] = []
-    eligible = [m for m in conversation_history if m.get("role") in ("user", "assistant") and m.get("content")]
+    eligible = [
+        m for m in conversation_history
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
     for m in eligible[-4:]:
         role = m["role"].upper()
         content = (m.get("content") or "")[:200]
@@ -158,22 +159,23 @@ async def classify_intent(
         "You are an intent classifier for a banking chatbot.\n"
         "Respond ONLY with valid JSON — no explanation, no markdown.\n\n"
         f"Available intents:\n{intent_list_lines}\n\n"
-        'Output format: {"intent": "<name>", "confidence": <0.0-1.0>}'
+        'Output format: {"intent": "<name>", "confidence": <0.0-1.0>, "next_likely": ["<intent_a>", "<intent_b>"]}\n'
+        'next_likely: list 1-2 intent names the user is MOST LIKELY to ask about next (use exact names from the list; empty list if unsure).'
     )
     user_prompt = (
         f"Recent conversation:\n{recent_ctx}\n\n"
         f"Classify this message: {msg}"
     )
 
-    # ── LLM call ───────────────────────────────────────────────────────
     intent_name = "general_faq"
     confidence = 0.5
+    next_likely: list[str] = []
 
     try:
         from litellm import acompletion
         from app.config import settings
 
-        model = settings.model_name
+        model = settings.classifier_model or settings.model_name
         kwargs: dict = {
             "model": model,
             "messages": [
@@ -192,25 +194,40 @@ async def classify_intent(
             kwargs["model"] = f"ollama/{model}"
         if "ollama/" in kwargs["model"]:
             kwargs["api_base"] = settings.ollama_base_url
+            if not settings.llm_thinking:
+                kwargs["extra_body"] = {"think": False}
 
+        llm_start = time.perf_counter()
         response = await acompletion(**kwargs)
+        llm_elapsed_ms = (time.perf_counter() - llm_start) * 1000
         raw = (response.choices[0].message.content or "").strip()
+        logger.info(
+            "Intent classifier completed in %.0f ms using model=%s",
+            llm_elapsed_ms,
+            kwargs["model"],
+        )
 
-        # Extract JSON — model may wrap it in ```json...```
         json_match = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group())
             intent_name = str(data.get("intent", "general_faq"))
             confidence = float(data.get("confidence", 0.7))
-            # Validate against known intents
             if intent_name not in INTENTS:
                 intent_name = "general_faq"
                 confidence = 0.4
+            raw_next = data.get("next_likely", [])
+            next_likely = [
+                n for n in (raw_next if isinstance(raw_next, list) else [])
+                if isinstance(n, str) and n in INTENTS
+            ][:2]
         else:
             logger.debug("Classifier returned non-JSON: %r", raw[:100])
 
     except Exception as exc:
-        logger.warning("Intent classification LLM call failed: %s — defaulting to general_faq", exc)
+        logger.warning(
+            "Intent classification LLM call failed: %s — defaulting to general_faq",
+            exc,
+        )
 
     intent_def = INTENTS.get(intent_name, FALLBACK_INTENT)
     is_negative = detect_negative_sentiment(message)
@@ -225,4 +242,5 @@ async def classify_intent(
         flow_name=intent_def.flow_name,
         required_slots=intent_def.required_slots,
         suggested_actions=intent_def.suggested_actions,
+        next_likely=next_likely,
     )

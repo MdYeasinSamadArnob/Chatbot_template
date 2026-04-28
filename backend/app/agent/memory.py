@@ -101,7 +101,9 @@ class AgentMemory:
         # ── Long-term: CrewAI SQLite-backed cross-session memory ────────
         db_path = os.path.join(persist_dir, f"ltm_{conversation_id}.db")
         self._long_term = LongTermStore(db_path)
-
+        # ── Intent summary log (LLM-generated, max 10 entries) ──────────
+        # Records what the user wanted and the outcome of each turn.
+        self._intent_log: list[dict[str, Any]] = []
     # ── Message management ──────────────────────────────────────────────────
 
     def add_user_message(self, content: str) -> None:
@@ -160,7 +162,32 @@ class AgentMemory:
     def recall(self, query: str, n: int = 5) -> list[str]:
         """Retrieve relevant long-term memories."""
         return self._long_term.search(query, latest_n=n)
+    # ── Intent summary log ────────────────────────────────────────────────
 
+    def record_intent(self, intent: str, summary: str) -> None:
+        """Record a clean LLM-generated summary of a completed turn."""
+        from datetime import datetime, timezone
+        entry: dict[str, Any] = {
+            "intent": intent,
+            "summary": summary,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        self._intent_log.append(entry)
+        if len(self._intent_log) > 10:
+            self._intent_log = self._intent_log[-10:]
+        # Mirror to long-term memory for cross-session recall
+        self._long_term.save(
+            task=intent,
+            output=summary,
+            metadata={"conversation_id": self.conversation_id},
+        )
+
+    def get_intent_context(self) -> str:
+        """Return last 3 intent summaries as formatted context string, or '' if empty."""
+        if not self._intent_log:
+            return ""
+        recent = self._intent_log[-3:]
+        return "\n".join(f"- {e['intent']}: {e['summary']}" for e in recent)
     # ── PostgreSQL persistence ──────────────────────────────────────────────
 
     async def load_from_db(self) -> None:
@@ -185,6 +212,8 @@ class AgentMemory:
             self._messages = cleaned
             if state:
                 self._state.update(state)
+                # Restore intent log and remove from state dict to keep _state clean
+                self._intent_log = list(self._state.pop("_intent_log", []))
             logger.info(
                 "Loaded %d messages and session state from DB for %s",
                 len(self._messages),
@@ -198,9 +227,12 @@ class AgentMemory:
         try:
             from app.db.connection import AsyncSessionLocal
             from app.db.repositories import save_messages, save_session_state
+            # Include intent log in persisted state
+            state_with_log = dict(self._state)
+            state_with_log["_intent_log"] = self._intent_log
             async with AsyncSessionLocal() as session:
                 await save_messages(session, self.conversation_id, self._messages)
-                await save_session_state(session, self.conversation_id, self._state)
+                await save_session_state(session, self.conversation_id, state_with_log)
             logger.info(
                 "Saved %d messages and state to DB for %s",
                 len(self._messages),

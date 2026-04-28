@@ -57,7 +57,7 @@ export function ChatEditor({ onSubmit, onCancel, isProcessing }: Props) {
       className="flex-shrink-0 px-3 pt-2 pb-3 bg-white border-t border-gray-200"
       style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
     >
-      <div className="flex items-end gap-2 bg-[#F5F7FF] rounded-2xl border border-gray-200 focus-within:border-[#1A56DB] focus-within:ring-2 focus-within:ring-blue-100 transition-all px-4 py-2.5 shadow-sm">
+      <div className="mx-auto w-full max-w-[920px] flex items-end gap-2 bg-[#F5F7FF] rounded-2xl border border-gray-200 focus-within:border-[#1A56DB] focus-within:ring-2 focus-within:ring-blue-100 transition-all px-4 py-2.5 shadow-sm">
         <textarea
           ref={textareaRef}
           value={input}

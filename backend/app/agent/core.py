@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from litellm import acompletion
@@ -69,12 +70,89 @@ _ROLE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Dismissal / conversation-close detection ──────────────────────────────
+# Matches messages where the user is satisfied and wants to end the conversation.
+# Checked BEFORE the LLM so the small model never has a chance to re-answer.
+_DISMISSAL_RE = re.compile(
+    r"""^\s*(?:
+        no[,.]?\s+(?:that(?:'?s|\s+is)\s+(?:all|fine|good|enough|ok(?:ay)?)(?:\s+i\s+need(?:ed)?)?|thanks?(?:\s+you)?|i(?:'?m)?\s+(?:good|ok(?:ay)?|fine|set|done)|need(?:\s+anything)?\s+else|more(?:\s+help)?|more\s+(?:details|info(?:rmation)?)|questions?) |
+        (?:no[,.]?\s*)?(?:that(?:'?s|\s+is)\s+(?:all|fine|good|enough|ok(?:ay)?|perfect|great|helpful|what\s+i\s+need(?:ed)?)(?:\s+i\s+need(?:ed)?)?) |
+        (?:no[,.]?\s*)?i(?:'?m)?\s+(?:good|ok(?:ay)?|fine|all\s+set|done|satisfied|all\s+good) |
+        (?:no[,.]?\s*)?(?:thanks?(?:\s+you)?(?:\s+very\s+much)?[,.]?\s*(?:that\s+(?:helped?|was\s+helpful|is\s+(?:enough|all)))?)|
+        (?:no[,.]?\s*)?(?:got\s+it[,.]?\s*(?:thanks?)?)|
+        (?:no[,.]?\s*)?(?:i\s+(?:understand|get\s+it)[,.]?\s*(?:thanks?)?)|
+        ok(?:ay)?[,.]?\s*(?:thanks?(?:\s+you)?)?[,.]?\s*(?:bye(?:bye)?|goodbye)?|
+        (?:no[,.]?\s*)?(?:never\s*mind(?:\s+thank\s+you)?|nvm)|
+        (?:no[,.]?\s*)?(?:i(?:'?ll)?\s+(?:figure\s+it\s+out|manage|handle\s+it))|
+        (?:no[,.]?\s*)?(?:bye(?:bye)?|goodbye|see\s+you|take\s+care)
+    )\s*[.!]*\s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_DISMISSAL_REPLIES = [
+    "You're welcome! Feel free to ask anytime you need help.",
+    "Happy to help! Don't hesitate to reach out if you need anything.",
+    "Of course! I'm here whenever you need assistance.",
+    "Glad I could help. Have a great day!",
+]
+
+def _is_dismissal(message: str) -> bool:
+    return bool(_DISMISSAL_RE.match(message.strip()))
+
+def _dismissal_reply() -> str:
+    import random
+    return random.choice(_DISMISSAL_REPLIES)
+
+
 # Known tool names (lower-cased for case-insensitive matching)
 _KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "escalate_to_human", "search_banking_knowledge", "vector_search",
     "web_search", "calculate", "calculator", "get_current_time",
     "get_datetime", "get_current_datetime",
 })
+
+# Detects conversation transcript replay mid-stream.
+# Catches: "User:", "### Assistant:", "\nHuman:", "\nBot:" etc.
+_TRANSCRIPT_LEAK_RE = re.compile(
+    r'(?:^|\n)[ \t]*(?:#{0,4}[ \t]*)?(User|Assistant|Human|Bot)\s*:',
+    re.IGNORECASE,
+)
+
+# Human-readable text shown in the tool-call indicator while a tool runs.
+_TOOL_ANNOUNCEMENTS: dict[str, str] = {
+    "search_banking_knowledge": "Let me check our knowledge base for that\u2026",
+    "vector_search":            "Let me search our knowledge base\u2026",
+    "calculate":                "Let me calculate that for you\u2026",
+    "get_current_time":         "Checking the current time\u2026",
+    "get_current_datetime":     "Checking the current time\u2026",
+    "get_datetime":             "Checking the current time\u2026",
+    "escalate_to_human":        "I\u2019ll connect you with a support agent\u2026",
+    "web_search":               "Let me search for the latest information\u2026",
+}
+
+
+def _is_ollama() -> bool:
+    """True when the configured API base is an Ollama instance."""
+    url = settings.ollama_base_url.lower()
+    return "11434" in url or "ollama" in url
+
+
+def _truncate_messages(
+    messages: list[dict[str, Any]],
+    max_turns: int = 6,
+) -> list[dict[str, Any]]:
+    """
+    Keep the last max_turns*2 conversation messages (user+assistant pairs)
+    so small models never see a context they can't handle reliably.
+
+    System messages are always kept; only conversation turns are trimmed.
+    """
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    convo_msgs  = [m for m in messages if m.get("role") != "system"]
+    limit = max_turns * 2
+    if len(convo_msgs) > limit:
+        convo_msgs = convo_msgs[-limit:]
+    return system_msgs + convo_msgs
 
 
 def _strip_tool_artifacts(text: str) -> str:
@@ -175,6 +253,9 @@ async def _call_llm(
 
     if "ollama/" in kwargs["model"]:
         kwargs["api_base"] = settings.ollama_base_url
+        # Disable thinking tokens for models like Qwen3 when not wanted
+        if not settings.llm_thinking:
+            kwargs["extra_body"] = {"think": False}
 
     # Only attach tool schema when there are tools — some models error on empty list
     if tools_schema:
@@ -212,6 +293,9 @@ async def _stream_llm_with_emitter(
         kwargs["model"] = f"ollama/{settings.model_name}"
     if "ollama/" in kwargs["model"]:
         kwargs["api_base"] = settings.ollama_base_url
+        # Disable thinking tokens for models like Qwen3 when not wanted
+        if not settings.llm_thinking:
+            kwargs["extra_body"] = {"think": False}
     if tools_schema:
         kwargs["tools"] = tools_schema
         kwargs["tool_choice"] = "auto"
@@ -219,22 +303,45 @@ async def _stream_llm_with_emitter(
     text_parts: list[str] = []
     tool_calls_acc: dict[int, dict[str, Any]] = {}
     usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
-    thinking_ended = False  # emit thinking_end exactly once when output starts
+    thinking_ended = False
+    # ── Lookahead buffer: hold back LOOKAHEAD chars so cross-token patterns
+    # (e.g. "User:" split as "User" + ":") are caught before hitting the UI. ──
+    _LOOKAHEAD = 40
+    pending_buf: str = ""
+    leak_stopped: bool = False
 
     response = await acompletion(**kwargs)
     async for chunk in response:
         choice = chunk.choices[0]
         delta = choice.delta
 
-        # ── Text chunk: emit immediately for token-by-token streaming ──
-        if delta.content:
-            cleaned = _strip_tool_artifacts(delta.content)
-            if cleaned:
-                if not thinking_ended:
-                    await emit_fn("thinking_end", {})
-                    thinking_ended = True
-                text_parts.append(cleaned)
-                await emit_fn("text_delta", {"delta": cleaned})
+        # ── Text chunk: buffer → detect transcript leak → emit safe prefix ──
+        if delta.content and not leak_stopped:
+            token = _strip_tool_artifacts(delta.content)
+            if token:
+                pending_buf += token
+                leak = _TRANSCRIPT_LEAK_RE.search(pending_buf)
+                if leak:
+                    # Transcript replay detected — emit only the clean prefix
+                    leak_stopped = True
+                    safe = pending_buf[:leak.start()].rstrip()
+                    if safe:
+                        if not thinking_ended:
+                            await emit_fn("thinking_end", {})
+                            thinking_ended = True
+                        text_parts.append(safe)
+                        await emit_fn("text_delta", {"delta": safe})
+                    pending_buf = ""
+                    logger.warning("[stream] Transcript leak detected and stopped")
+                elif len(pending_buf) > _LOOKAHEAD:
+                    # Safe to emit everything except the lookahead tail
+                    safe = pending_buf[:-_LOOKAHEAD]
+                    pending_buf = pending_buf[-_LOOKAHEAD:]
+                    if not thinking_ended:
+                        await emit_fn("thinking_end", {})
+                        thinking_ended = True
+                    text_parts.append(safe)
+                    await emit_fn("text_delta", {"delta": safe})
 
         # ── Tool call deltas: accumulate fragments into whole calls ────
         tc_list = getattr(delta, "tool_calls", None)
@@ -265,6 +372,17 @@ async def _stream_llm_with_emitter(
             usage["prompt_tokens"] = getattr(chunk_usage, "prompt_tokens", 0) or 0
             usage["completion_tokens"] = getattr(chunk_usage, "completion_tokens", 0) or 0
 
+    # ── Flush remaining lookahead buffer ──────────────────────────────
+    if pending_buf and not leak_stopped:
+        leak = _TRANSCRIPT_LEAK_RE.search(pending_buf)
+        safe = pending_buf[:leak.start()].rstrip() if leak else pending_buf
+        if safe:
+            if not thinking_ended:
+                await emit_fn("thinking_end", {})
+                thinking_ended = True
+            text_parts.append(safe)
+            await emit_fn("text_delta", {"delta": safe})
+
     full_text = "".join(text_parts)
     raw_tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
     return full_text, raw_tool_calls, usage
@@ -283,11 +401,19 @@ async def _execute_tool(
     Mirrors Metabase's tool-executor-xf which catches per-tool errors
     and converts them to humanised error strings.
     """
+    conv_id = getattr(memory, "conversation_id", "unknown")
+    started = time.perf_counter()
     try:
         args_dict: dict[str, Any] = (
             json.loads(raw_arguments)
             if isinstance(raw_arguments, str)
             else (raw_arguments or {})
+        )
+        logger.info(
+            "[%s] tool_start name=%s args_keys=%s",
+            conv_id,
+            tool_def.name,
+            sorted(list(args_dict.keys()))[:8],
         )
         input_obj = tool_def.schema(**args_dict)
 
@@ -300,10 +426,65 @@ async def _execute_tool(
                 None,
                 lambda o=input_obj, m=memory, f=tool_def.fn: f(o, memory=m),
             )
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.info(
+            "[%s] tool_done name=%s elapsed_ms=%.0f result_len=%d",
+            conv_id,
+            tool_def.name,
+            elapsed_ms,
+            len(str(result)),
+        )
         return str(result)
     except Exception as exc:
-        logger.warning("Tool %r raised: %s", tool_def.name, exc)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.warning(
+            "[%s] tool_fail name=%s elapsed_ms=%.0f error=%s",
+            conv_id,
+            tool_def.name,
+            elapsed_ms,
+            exc,
+        )
         return f"Error executing {tool_def.name}: {exc}"
+
+
+# ── Background memory summarization ───────────────────────────────────────
+
+async def _summarize_and_record(
+    user_message: str,
+    answer_text: str,
+    intent: str,
+    memory: AgentMemory,
+) -> None:
+    """
+    Fire-and-forget: use LLM to generate a clean 1-sentence memory summary.
+    Called as asyncio.create_task() after finish — zero latency impact.
+    """
+    if not answer_text.strip():
+        return
+    try:
+        prompt = (
+            "In one short sentence, summarize: what did the user want, and what was the key outcome?\n"
+            f"User message: {user_message[:300]}\n"
+            f"Assistant answer: {answer_text[:400]}"
+        )
+        kwargs: dict[str, Any] = {
+            "model": settings.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": 80,
+        }
+        if _is_ollama():
+            if "/" not in kwargs["model"]:
+                kwargs["model"] = f"ollama/{settings.model_name}"
+            kwargs["api_base"] = settings.ollama_base_url
+        response = await acompletion(**kwargs)
+        summary = (response.choices[0].message.content or "").strip().strip('"\'')
+        if summary:
+            memory.record_intent(intent, summary)
+            logger.debug("[memory] Recorded: %r \u2192 %r", intent, summary[:80])
+    except Exception as exc:
+        logger.debug("[memory] Summarization failed (non-critical): %s", exc)
 
 
 # ── Main agent loop ────────────────────────────────────────────────────────
@@ -329,6 +510,15 @@ async def run_agent_loop(
     """
     context = context or {}
     profile = get_profile(profile_name)
+
+    # ── Short-circuit: dismissal / conversation-close ──────────────────
+    if _is_dismissal(message):
+        reply = _dismissal_reply()
+        memory.add_user_message(message)
+        memory.add_assistant_message(reply)
+        yield text_part(reply)
+        yield finish_part("stop")
+        return
 
     # ── Seed session state from the client (cross-request continuity) ──
     if session_state:
@@ -357,10 +547,18 @@ async def run_agent_loop(
             "[%s] iteration %d/%d", conversation_id, iteration + 1, profile.max_iterations
         )
 
-        messages = [
+        messages = _truncate_messages([
             {"role": "system", "content": system_prompt},
             *memory.get_messages(),
-        ]
+        ])
+        if _is_ollama():
+            messages = [*messages, {
+                "role": "user",
+                "content": (
+                    "[INST] Write only your next assistant reply below. "
+                    "Do NOT include role labels, conversation history, or any preamble. [/INST]"
+                ),
+            }]
 
         # ── 1. Call LLM ────────────────────────────────────────────────
         try:
@@ -430,6 +628,7 @@ async def run_agent_loop(
         async def _exec(tc_id: str, tc_name: str, tc_args: dict) -> tuple[str, str]:
             tool_def = registry.get(tc_name)
             if tool_def is None:
+                logger.warning("[%s] tool_unregistered name=%s", conversation_id, tc_name)
                 error_flags_sse["has_unregistered"] = True
                 return tc_id, (
                     f"Tool '{tc_name}' does not exist. "
@@ -438,8 +637,15 @@ async def run_agent_loop(
             result = await _execute_tool(tool_def, tc_args, memory)
             return tc_id, result
 
+        tool_batch_started = time.perf_counter()
         results: list[tuple[str, str]] = await asyncio.gather(
             *[_exec(tid, tname, targs) for tid, tname, targs in parsed_tool_calls]
+        )
+        logger.info(
+            "[%s] tool_batch_done calls=%d elapsed_ms=%.0f",
+            conversation_id,
+            len(parsed_tool_calls),
+            (time.perf_counter() - tool_batch_started) * 1000,
         )
 
         # ── 8. Emit tool results + update memory (AI SDK a: parts) ────
@@ -491,7 +697,10 @@ async def run_agent_loop_with_emitter(
     emit_fn: Callable[[str, Any], Awaitable[None]],
     profile_name: str = "banking",
     context: dict | None = None,
-    session_state: dict | None = None,    suggested_actions: list[dict] | None = None,) -> None:
+    session_state: dict | None = None,
+    suggested_actions: list[dict] | None = None,
+    skip_initial_thinking: bool = False,
+) -> dict[str, int]:
     """
     Same plan→act→observe loop as run_agent_loop, but instead of
     yielding SSE lines it calls emit_fn(event_name, payload) — the
@@ -500,12 +709,48 @@ async def run_agent_loop_with_emitter(
     context = context or {}
     profile = get_profile(profile_name)
 
+    # ── Short-circuit: dismissal / conversation-close ──────────────────
+    if _is_dismissal(message):
+        reply = _dismissal_reply()
+        memory.add_user_message(message)
+        memory.add_assistant_message(reply)
+        await emit_fn("text_delta", {"text": reply})
+        await emit_fn("message_complete", {"text": reply, "finish_reason": "stop"})
+        return {"prompt_tokens": 0, "completion_tokens": 0}
+
     if session_state:
         memory.update_state(session_state)
 
     ltm_hits = memory.recall(message, n=3)
     memory.add_user_message(message)
-    system_prompt = build_system_prompt(profile, context, ltm_hits or None)
+    system_prompt = build_system_prompt(
+        profile, context, ltm_hits or None,
+        intent_context=memory.get_intent_context(),
+    )
+
+    # ── Confidence-gated KB injection ──────────────────────────────────
+    # context["_kb_context"] / context["_kb_confidence"] are pre-populated
+    # by socket_handlers via parallel _prefetch_kb() execution.
+    kb_ctx = str(context.get("_kb_context", "") or "")
+    kb_conf = float(context.get("_kb_confidence", 0.0) or 0.0)
+    if kb_ctx:
+        if kb_conf > 0.6:
+            system_prompt += (
+                "\n\n## Retrieved Knowledge\n"
+                + kb_ctx
+                + "\n\nUse the Retrieved Knowledge above before calling "
+                "`search_banking_knowledge`. Only call the tool if you need "
+                "fresher or more specific information not already covered."
+            )
+            logger.debug("[%s] Strong KB injected (confidence=%.2f)", conversation_id, kb_conf)
+        elif kb_conf > 0.3:
+            system_prompt += (
+                "\n\n## Potentially Relevant Knowledge (verify before using)\n"
+                + kb_ctx
+            )
+            logger.debug("[%s] Partial KB injected (confidence=%.2f)", conversation_id, kb_conf)
+        else:
+            logger.debug("[%s] KB not injected — confidence=%.2f \u2264 0.3", conversation_id, kb_conf)
 
     profile_tools = profile.get_tools()
     tools_schema = [t.to_openai_tool() for t in profile_tools] if profile_tools else None
@@ -513,18 +758,32 @@ async def run_agent_loop_with_emitter(
     prompt_tokens_total = 0
     completion_tokens_total = 0
     consecutive_tool_errors = 0  # break loop if LLM keeps hallucinating tools
+    answer_text_parts: list[str] = []  # accumulate final answer for memory summarization
 
-    await emit_fn("thinking_start", {})
+    if not skip_initial_thinking:
+        await emit_fn("thinking_start", {})
 
     for iteration in range(profile.max_iterations):
         logger.debug(
             "[%s] sio iteration %d/%d", conversation_id, iteration + 1, profile.max_iterations
         )
 
-        messages = [
+        # Truncate context to last 6 turns (12 msgs) so small models don't get
+        # confused by long histories and start replaying the conversation.
+        messages = _truncate_messages([
             {"role": "system", "content": system_prompt},
             *memory.get_messages(),
-        ]
+        ])
+        # Response anchor: for small Ollama models, an explicit final instruction
+        # prevents the model from continuing the transcript as its "reply".
+        if _is_ollama():
+            messages = [*messages, {
+                "role": "user",
+                "content": (
+                    "[INST] Write only your next assistant reply below. "
+                    "Do NOT include role labels, conversation history, or any preamble. [/INST]"
+                ),
+            }]
 
         # ── 1. Call LLM — stream final answers, non-stream tool-decision turns ──
         # Small models (llama3.2:3b) emit tool calls as raw JSON text when
@@ -566,6 +825,7 @@ async def run_agent_loop_with_emitter(
 
                 # Emit text now if the model gave text AND tool calls together
                 if text_content:
+                    answer_text_parts.append(text_content)
                     await emit_fn("thinking_end", {})
                     await emit_fn("text_delta", {"delta": text_content})
             else:
@@ -575,6 +835,8 @@ async def run_agent_loop_with_emitter(
                 )
                 prompt_tokens_total += iter_usage.get("prompt_tokens", 0)
                 completion_tokens_total += iter_usage.get("completion_tokens", 0)
+                if text_content:
+                    answer_text_parts.append(text_content)
         except Exception as exc:
             logger.error("[%s] LLM call failed: %s", conversation_id, exc)
             await emit_fn("error", {"message": f"LLM call failed: {exc}"})
@@ -610,6 +872,10 @@ async def run_agent_loop_with_emitter(
                 "toolCallId": tc["id"],
                 "toolName": tc["function"]["name"],
                 "args": args_dict,
+                # Human-readable announcement shown in the tool indicator
+                "announcement": _TOOL_ANNOUNCEMENTS.get(
+                    tc["function"]["name"], "Looking that up for you\u2026"
+                ),
             })
 
         # Execute tools in parallel — track hallucinated (unregistered) tool names
@@ -618,6 +884,7 @@ async def run_agent_loop_with_emitter(
         async def _exec(tc_id: str, tc_name: str, tc_args: dict) -> tuple[str, str]:
             tool_def = registry.get(tc_name)
             if tool_def is None:
+                logger.warning("[%s] tool_unregistered name=%s", conversation_id, tc_name)
                 error_flags["has_unregistered"] = True
                 return tc_id, (
                     f"Tool '{tc_name}' does not exist. "
@@ -626,8 +893,15 @@ async def run_agent_loop_with_emitter(
             result = await _execute_tool(tool_def, tc_args, memory)
             return tc_id, result
 
+        tool_batch_started = time.perf_counter()
         results: list[tuple[str, str]] = await asyncio.gather(
             *[_exec(tid, tname, targs) for tid, tname, targs in parsed_tool_calls]
+        )
+        logger.info(
+            "[%s] tool_batch_done calls=%d elapsed_ms=%.0f",
+            conversation_id,
+            len(parsed_tool_calls),
+            (time.perf_counter() - tool_batch_started) * 1000,
         )
 
         step_parts: list[dict] = []
@@ -663,16 +937,19 @@ async def run_agent_loop_with_emitter(
                 })
                 break
 
-    # Emit finish — include suggested_actions so frontend chips update atomically
+    # Emit final thinking_end
     await emit_fn("thinking_end", {})
-    await emit_fn("finish", {
-        "finishReason": "stop",
-        "usage": {
-            "promptTokens": prompt_tokens_total,
-            "completionTokens": completion_tokens_total,
-        },
-        "suggestedActions": suggested_actions or [],
-    })
+
+    # Fire-and-forget memory summarization (background task, zero latency impact)
+    full_answer = " ".join(answer_text_parts).strip()
+    if full_answer:
+        intent = str(context.get("_last_topic", "general_faq"))
+        asyncio.create_task(_summarize_and_record(message, full_answer, intent, memory))
+
+    return {
+        "promptTokens": prompt_tokens_total,
+        "completionTokens": completion_tokens_total,
+    }
 
 
 # ── Re-explain loop (Socket.IO) ────────────────────────────────────────────
@@ -684,6 +961,7 @@ async def run_reexplain_loop_with_emitter(
     memory: AgentMemory,
     emit_fn: Callable[[str, Any], Awaitable[None]],
     suggested_actions: list[dict] | None = None,
+    skip_initial_thinking: bool = False,
 ) -> None:
     """
     Handle "I didn't understand" / clarification requests.
@@ -691,7 +969,8 @@ async def run_reexplain_loop_with_emitter(
     Calls the LLM once with a special re-explain prompt — no tools,
     just a reformatted version of the previous response.
     """
-    await emit_fn("thinking_start", {})
+    if not skip_initial_thinking:
+        await emit_fn("thinking_start", {})
 
     system_prompt = build_reexplain_prompt(
         user_message=user_message,

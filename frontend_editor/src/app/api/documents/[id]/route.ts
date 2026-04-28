@@ -14,7 +14,8 @@ export async function GET(_req: NextRequest, { params }: RouteContext) {
     const rows = await query(
       `SELECT
         d.id, d.title, d.category, d.subcategory, d.intent_tags,
-        d.version, d.author, d.is_published, d.created_at, d.updated_at,
+        d.version, d.author, d.is_published, d.embedding_status, d.embedded_at,
+        d.created_at, d.updated_at,
         c.id AS chunk_id, c.document_type, c.content_type,
         -- Prefer content_raw; fall back to content_text for markdown-typed chunks
         COALESCE(NULLIF(c.content_raw, ''), c.content_text) AS content_raw,
@@ -107,10 +108,19 @@ export async function PUT(req: NextRequest, { params }: RouteContext) {
     if (embedding) {
       const vecStr = "[" + embedding.join(",") + "]";
       await query(
-        `UPDATE knowledge_chunks SET chunk_embedding = $1::vector
-         WHERE document_id = $2 ORDER BY chunk_index ASC LIMIT 1`,
+        `UPDATE knowledge_chunks
+         SET chunk_embedding = $1::vector
+         WHERE id = (
+           SELECT id
+           FROM knowledge_chunks
+           WHERE document_id = $2 AND is_active = TRUE
+           ORDER BY chunk_index ASC
+           LIMIT 1
+         )`,
         [vecStr, params.id]
-      ).catch(() => {});
+      ).catch((err) => {
+        console.error("PUT /api/documents/[id] embedding update failed:", err);
+      });
     }
 
     return NextResponse.json(doc);

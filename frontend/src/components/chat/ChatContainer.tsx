@@ -33,7 +33,7 @@ export function ChatContainer({ onSuggestion }: Props) {
       {messages.length === 0 ? (
         <EmptyState onSuggestion={onSuggestion} />
       ) : (
-        <div className="py-3 space-y-1 pb-2 flex-1">
+        <div className="py-3 space-y-1 pb-2 flex-1 w-full max-w-[920px] mx-auto">
           {messages.map((msg) => (
             <MessageDispatcher key={msg.id} message={msg} />
           ))}
@@ -42,11 +42,13 @@ export function ChatContainer({ onSuggestion }: Props) {
 
       {/* Quick-reply chips — shown below last message, cleared on user send */}
       {suggestedActions.length > 0 && onSuggestion && (
-        <QuickReplyBar
-          actions={suggestedActions}
-          onSelect={onSuggestion}
-          disabled={isProcessing}
-        />
+        <div className="w-full max-w-[920px] mx-auto">
+          <QuickReplyBar
+            actions={suggestedActions}
+            onSelect={onSuggestion}
+            disabled={isProcessing}
+          />
+        </div>
       )}
 
       <div ref={bottomRef} className="h-2" />

@@ -11,7 +11,8 @@ export async function GET() {
     const rows = await query(`
       SELECT
         d.id, d.title, d.category, d.subcategory, d.intent_tags,
-        d.version, d.author, d.is_published, d.created_at, d.updated_at,
+        d.version, d.author, d.is_published, d.embedding_status, d.embedded_at,
+        d.created_at, d.updated_at,
         c.id           AS chunk_id,
         c.document_type,
         c.content_type,
@@ -29,7 +30,6 @@ export async function GET() {
         ORDER BY chunk_index ASC
         LIMIT 1
       ) c ON TRUE
-      WHERE d.is_published = TRUE
       ORDER BY d.updated_at DESC
       LIMIT 200
     `);
@@ -104,10 +104,19 @@ export async function POST(req: NextRequest) {
     if (embedding) {
       const vecStr = "[" + embedding.join(",") + "]";
       await query(
-        `UPDATE knowledge_chunks SET chunk_embedding = $1::vector
-         WHERE document_id = $2 ORDER BY chunk_index ASC LIMIT 1`,
+        `UPDATE knowledge_chunks
+         SET chunk_embedding = $1::vector
+         WHERE id = (
+           SELECT id
+           FROM knowledge_chunks
+           WHERE document_id = $2 AND is_active = TRUE
+           ORDER BY chunk_index ASC
+           LIMIT 1
+         )`,
         [vecStr, docId]
-      ).catch(() => {});
+      ).catch((err) => {
+        console.error("POST /api/documents embedding update failed:", err);
+      });
     }
 
     return NextResponse.json(doc, { status: 201 });

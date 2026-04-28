@@ -17,6 +17,13 @@ const TYPE_BADGES: Record<string, string> = {
   scraped:   "bg-gray-100 text-gray-600",
 };
 
+const EMBEDDING_BADGES: Record<string, string> = {
+  ready: "bg-emerald-100 text-emerald-700",
+  processing: "bg-amber-100 text-amber-700",
+  failed: "bg-rose-100 text-rose-700",
+  pending: "bg-slate-200 text-slate-600",
+};
+
 interface Props {
   documents: KBDocument[];
   selectedId: string | null;
@@ -35,7 +42,7 @@ export function HistorySidebar({
   onDelete,
 }: Props) {
   return (
-    <aside className="w-60 bg-gray-900 text-white flex flex-col h-full shrink-0">
+    <aside className="flex h-full w-full max-w-[22rem] shrink-0 flex-col bg-gray-900 text-white lg:w-72 lg:max-w-none">
       {/* Header */}
       <div className="px-4 py-4 border-b border-gray-700/60">
         <div className="flex items-center gap-2 mb-3">
@@ -46,7 +53,7 @@ export function HistorySidebar({
         </div>
         <button
           onClick={onNew}
-          className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-1.5"
+          className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium transition-colors hover:bg-blue-500 flex items-center justify-center gap-1.5"
         >
           <span className="text-lg leading-none">+</span> New Document
         </button>
@@ -69,7 +76,7 @@ export function HistorySidebar({
             <div
               key={doc.id}
               onClick={() => onSelect(doc)}
-              className={`group rounded-lg p-3 cursor-pointer transition-colors relative ${
+              className={`group relative cursor-pointer rounded-lg p-3 transition-colors ${
                 selectedId === doc.id
                   ? "bg-blue-700 text-white"
                   : "hover:bg-gray-800 text-gray-300"
@@ -94,8 +101,22 @@ export function HistorySidebar({
                 {doc.title}
               </p>
 
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+                <span className={`rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${doc.is_published ? "bg-emerald-500/15 text-emerald-300" : "bg-slate-500/20 text-slate-300"}`}>
+                  {doc.is_published ? "Published" : "Draft"}
+                </span>
+                <span className={`rounded-full px-2 py-0.5 font-semibold ${EMBEDDING_BADGES[doc.embedding_status ?? "pending"] ?? EMBEDDING_BADGES.pending}`}>
+                  {doc.embedding_status ?? "pending"}
+                </span>
+                {doc.subcategory && (
+                  <span className="rounded-full bg-white/10 px-2 py-0.5 text-gray-200">
+                    {doc.subcategory}
+                  </span>
+                )}
+              </div>
+
               {/* Date + version */}
-              <p className="text-[10px] text-gray-500 mt-1">
+              <p className="mt-2 text-[10px] text-gray-500">
                 {new Date(doc.updated_at).toLocaleDateString(undefined, {
                   month: "short",
                   day: "numeric",
@@ -121,7 +142,7 @@ export function HistorySidebar({
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-gray-700/60 text-[10px] text-gray-600 text-center">
+      <div className="border-t border-gray-700/60 px-4 py-2 text-center text-[10px] text-gray-600">
         {documents.length} document{documents.length !== 1 ? "s" : ""}
       </div>
     </aside>

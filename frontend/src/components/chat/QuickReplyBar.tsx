@@ -29,29 +29,32 @@ export function QuickReplyBar({ actions, onSelect, disabled = false }: Props) {
   if (!actions.length) return null;
 
   return (
-    <div
-      ref={scrollRef}
-      className="flex gap-2 overflow-x-auto py-2 px-4 pb-3 no-scrollbar"
-      style={{ WebkitOverflowScrolling: "touch" }}
-      role="group"
-      aria-label="Quick reply options"
-    >
-      {actions.map((action) => (
-        <button
-          key={action.value}
-          onClick={() => !disabled && onSelect(action.value)}
-          disabled={disabled}
-          className={[
-            "flex-shrink-0 text-sm font-medium rounded-full px-4 py-2 border transition-colors",
-            "whitespace-nowrap min-h-[36px] active:scale-[0.97]",
-            disabled
-              ? "opacity-50 cursor-not-allowed bg-white border-gray-200 text-gray-400"
-              : "bg-white border-[#1A56DB] text-[#1A56DB] hover:bg-blue-50 cursor-pointer shadow-sm",
-          ].join(" ")}
-        >
-          {action.label}
-        </button>
-      ))}
+    <div className="px-3 pb-2 pt-1 md:px-4 md:pb-3">
+      <div
+        ref={scrollRef}
+        className="no-scrollbar flex gap-2 overflow-x-auto md:flex-wrap md:overflow-visible"
+        style={{ WebkitOverflowScrolling: "touch" }}
+        role="group"
+        aria-label="Quick reply options"
+      >
+        {actions.map((action) => (
+          <button
+            key={action.value}
+            onClick={() => !disabled && onSelect(action.value)}
+            disabled={disabled}
+            className={[
+              "inline-flex items-center justify-center rounded-full border px-3.5 py-2 text-xs md:text-sm font-medium",
+              "min-h-[36px] whitespace-nowrap transition-all duration-150 active:scale-[0.97]",
+              "shadow-[0_2px_10px_rgba(15,23,42,0.07)]",
+              disabled
+                ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                : "cursor-pointer border-blue-200 bg-white text-[#1A56DB] hover:border-[#1A56DB] hover:bg-blue-50",
+            ].join(" ")}
+          >
+            {action.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
