@@ -245,6 +245,17 @@ class FlowEngine:
         raw_type = collected.get("statement_type", "detailed") or "detailed"
         statement_type_display = raw_type.capitalize()
 
+        # Avoid duplicate kwargs in str.format when collected slots contain
+        # keys that are also passed explicitly below.
+        explicit_keys = {
+            "date_range",
+            "date_range_label",
+            "statement_type",
+            "statement_type_display",
+            "bank_name",
+        }
+        template_slots = {k: v for k, v in collected.items() if k not in explicit_keys}
+
         try:
             completion_text = self.flow.completion_text_template.format(
                 date_range=date_range,
@@ -252,7 +263,7 @@ class FlowEngine:
                 statement_type=raw_type,
                 statement_type_display=statement_type_display,
                 bank_name=bank_name,
-                **{k: v for k, v in collected.items()},
+                **template_slots,
             )
         except KeyError as exc:
             logger.warning("Flow completion template key error: %s", exc)
