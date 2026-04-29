@@ -27,7 +27,7 @@ const EMPTY_META: DocumentMetadata = {
 const CATEGORIES = ["general", "account", "transfer", "loan", "card"] as const;
 const DOC_TYPES  = ["faq", "procedure", "policy", "scraped"] as const;
 const LANGUAGES  = ["en", "bn", "mixed"] as const;
-const LIST_STATUS_FILTERS = ["all", "published", "draft", "processing", "failed"] as const;
+const LIST_STATUS_FILTERS = ["all", "published", "draft", "pending", "processing", "failed"] as const;
 
 // ── Component ──────────────────────────────────────────────────────────────
 
@@ -37,6 +37,7 @@ export default function EditorPage() {
   const [meta, setMeta]               = useState<DocumentMetadata>({ ...EMPTY_META });
   const [tagsInput, setTagsInput]     = useState("");
   const [blocks, setBlocks]           = useState<RenderBlock[]>([]);
+  const [previewHtml, setPreviewHtml] = useState("");
   const [isSaving, setIsSaving]       = useState(false);
   const [isLoading, setIsLoading]     = useState(true);
   const [isDirty, setIsDirty]         = useState(false);
@@ -64,6 +65,7 @@ export default function EditorPage() {
       listStatus === "all" ||
       (listStatus === "published" && doc.is_published) ||
       (listStatus === "draft" && !doc.is_published) ||
+      (listStatus === "pending" && (doc.embedding_status ?? "pending") === "pending") ||
       (listStatus === "processing" && doc.embedding_status === "processing") ||
       (listStatus === "failed" && doc.embedding_status === "failed");
 
@@ -94,6 +96,7 @@ export default function EditorPage() {
   // ── Editor change callback ─────────────────────────────────────────
 
   const handleEditorChange = useCallback((html: string) => {
+    setPreviewHtml(html);
     setBlocks(htmlToRenderBlocks(html));
     setIsDirty(true);
   }, []);
@@ -105,6 +108,7 @@ export default function EditorPage() {
     setMeta({ ...EMPTY_META });
     setTagsInput("");
     setBlocks([]);
+    setPreviewHtml("");
     setIsDirty(false);
     setMobilePane("editor");
     setIsDocPanelOpen(false);
@@ -139,6 +143,7 @@ export default function EditorPage() {
 
       const html = contentToHtml(full.content_raw ?? "", full.content_type ?? "wysiwyg_html");
       editorRef.current?.setContent(html);
+      setPreviewHtml(html);
       setBlocks(htmlToRenderBlocks(html));
       setIsDirty(false);
     } catch {
@@ -328,6 +333,7 @@ export default function EditorPage() {
               <option value="all">All statuses</option>
               <option value="published">Published</option>
               <option value="draft">Drafts</option>
+              <option value="pending">Pending</option>
               <option value="processing">Embedding</option>
               <option value="failed">Failed</option>
             </select>
@@ -503,7 +509,7 @@ export default function EditorPage() {
               </span>
             </div>
             <div className="flex-1 overflow-hidden">
-              <PreviewPane blocks={blocks} />
+              <PreviewPane blocks={blocks} html={previewHtml} />
             </div>
           </div>
         </div>

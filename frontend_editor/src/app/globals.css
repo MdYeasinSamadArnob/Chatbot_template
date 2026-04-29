@@ -48,6 +48,17 @@
   font-weight: 600;
 }
 
+/* ── KB preview styles ────────────────────────────────────────────── */
+.kb-preview {
+  word-break: break-word;
+}
+
+.kb-preview p,
+.kb-preview li,
+.kb-preview blockquote {
+  white-space: pre-wrap;
+}
+
 /* ── Scrollbar hide utility ───────────────────────────────────────── */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

@@ -17,6 +17,24 @@ import type {
 
 const THINKING_ID = "__thinking__";
 
+function createId(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+
+  if (c?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    // RFC 4122 variant/version bits
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  // Last-resort fallback for older/insecure browser contexts
+  return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 const defaultSessionState = (): SessionState => ({
   todos: [],
   notes: {},
@@ -27,7 +45,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // â”€â”€ Initial state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   messages: [],
   isProcessing: false,
-  conversationId: crypto.randomUUID(),
+  conversationId: createId(),
   sessionState: defaultSessionState(),
   errorMessages: [],
   connectionStatus: "disconnected",
@@ -38,7 +56,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   addUserMessage: (text: string) =>
     set((state) => {
       const msg: UserTextMessage = {
-        id: crypto.randomUUID(),
+        id: createId(),
         type: "user_text",
         text,
         timestamp: Date.now(),
@@ -62,7 +80,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       const newMsg: AgentTextMessage = {
-        id: crypto.randomUUID(),
+        id: createId(),
         type: "agent_text",
         text: delta,
         streaming: true,
@@ -137,14 +155,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         .map((m) => {
           if (m.role === "user") {
             return {
-              id: crypto.randomUUID(),
+              id: createId(),
               type: "user_text",
               text: m.content,
               timestamp: Date.now(),
             } as UserTextMessage;
           }
           return {
-            id: crypto.randomUUID(),
+            id: createId(),
             type: "agent_text",
             text: m.content,
             timestamp: Date.now(),
@@ -157,7 +175,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set({
       messages: [],
       isProcessing: false,
-      conversationId: crypto.randomUUID(),
+      conversationId: createId(),
       sessionState: defaultSessionState(),
       errorMessages: [],
       suggestedActions: [],

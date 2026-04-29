@@ -24,6 +24,12 @@ ollama pull llama3.2
 
 ## 2. Backend
 
+# Stop backend server by port
+fuser -k 9001/tcp
+
+# OR stop by process name/pattern
+pkill -f "uvicorn app.main:app --reload --port 9001"
+
 ```powershell
 cd Demo_Project\backend
 
@@ -42,7 +48,7 @@ Copy-Item .env.example .env          # Windows
 # cp .env.example .env               # macOS / Linux
 
 # Start the backend (port 8000)
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 9001
 ```
 
 API docs available at http://localhost:8000/docs

@@ -4,14 +4,26 @@ import type { RenderBlock } from "@/types";
 
 interface PreviewPaneProps {
   blocks: RenderBlock[];
+  html?: string;
 }
 
-export function PreviewPane({ blocks }: PreviewPaneProps) {
-  if (blocks.length === 0) {
+export function PreviewPane({ blocks, html = "" }: PreviewPaneProps) {
+  if (!html.trim() && blocks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-gray-400 select-none">
         <span className="text-5xl mb-3">📄</span>
         <p className="text-sm">Preview updates as you type</p>
+      </div>
+    );
+  }
+
+  if (html.trim()) {
+    return (
+      <div className="h-full overflow-y-auto p-6">
+        <article
+          className="kb-preview prose prose-sm max-w-none prose-slate"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
       </div>
     );
   }

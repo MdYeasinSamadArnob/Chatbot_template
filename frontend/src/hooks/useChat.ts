@@ -60,7 +60,9 @@ export function useChat(conversationId?: string) {
       store.removeThinking();
     });
 
-    socketClient.on("text_delta", ({ delta }) => {
+    socketClient.on("text_delta", (payload) => {
+      const delta = payload?.delta ?? payload?.text ?? "";
+      if (!delta) return;
       store.removeThinking();
       store.addAgentTextDelta(delta);
     });
@@ -89,7 +91,7 @@ export function useChat(conversationId?: string) {
       isProcessingRef.current = false;
     });
 
-    socketClient.on("finish", (data?: { suggestedActions?: unknown }) => {
+    socketClient.on("finish", (data) => {
       store.removeThinking();
       store.finishStreaming();
       store.setProcessing(false);

@@ -103,6 +103,15 @@ export async function PUT(req: NextRequest, { params }: RouteContext) {
       ]
     );
 
+    await query(
+      `UPDATE knowledge_documents
+       SET embedding_status = 'processing', embedded_at = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [params.id]
+    ).catch((err) => {
+      console.warn("PUT /api/documents/[id]: embedding_status processing update skipped:", err);
+    });
+
     // Generate and store embedding (best-effort — failure doesn't block save)
     const embedding = await generateEmbedding(content_text);
     if (embedding) {
@@ -120,6 +129,24 @@ export async function PUT(req: NextRequest, { params }: RouteContext) {
         [vecStr, params.id]
       ).catch((err) => {
         console.error("PUT /api/documents/[id] embedding update failed:", err);
+      });
+
+      await query(
+        `UPDATE knowledge_documents
+         SET embedding_status = 'ready', embedded_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [params.id]
+      ).catch((err) => {
+        console.warn("PUT /api/documents/[id]: embedding_status ready update skipped:", err);
+      });
+    } else {
+      await query(
+        `UPDATE knowledge_documents
+         SET embedding_status = 'failed', updated_at = NOW()
+         WHERE id = $1`,
+        [params.id]
+      ).catch((err) => {
+        console.warn("PUT /api/documents/[id]: embedding_status failed update skipped:", err);
       });
     }
 

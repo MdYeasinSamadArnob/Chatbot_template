@@ -24,11 +24,15 @@ type ListenEvents = {
   history: (data: { messages: Array<{ role: string; content: string }> }) => void;
   thinking_start: () => void;
   thinking_end: () => void;
-  text_delta: (data: { delta: string }) => void;
+  text_delta: (data: { delta?: string; text?: string }) => void;
   tool_call: (data: { toolCallId: string; toolName: string; args: Record<string, unknown>; announcement?: string }) => void;
   tool_result: (data: { toolCallId: string; result: string }) => void;
   state: (data: Record<string, unknown>) => void;
-  finish: (data: { finishReason: string; usage: { promptTokens: number; completionTokens: number } }) => void;
+  finish: (data: {
+    finishReason: string;
+    usage: { promptTokens: number; completionTokens: number };
+    suggestedActions?: Array<{ label: string; value: string }>;
+  }) => void;
   chips_update: (data: { suggestedActions: Array<{ label: string; value: string }> }) => void;
   error: (data: { message: string }) => void;
   conversation_reset: (data: { conversation_id: string }) => void;
