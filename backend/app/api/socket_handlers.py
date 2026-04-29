@@ -67,6 +67,14 @@ _YN_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_FORCE_ESCALATION_CHIP_VALUES = {
+    "connect me to an officer",
+    "connect me to an agent",
+    "i want to speak to a support agent",
+    "speak to human",
+    "need a human agent",
+}
+
 
 def _redact_pii(text: str) -> str:
     """Replace card/account numbers in log strings with ***."""
@@ -85,6 +93,149 @@ def _get_last_bot_message(memory) -> str:
         if msg.get("role") == "assistant" and msg.get("content"):
             return msg["content"]
     return ""
+
+
+def _normalize_user_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _is_forced_escalation_chip(text: str) -> bool:
+    return _normalize_user_text(text) in _FORCE_ESCALATION_CHIP_VALUES
+
+
+def _format_log_fields(fields: dict[str, Any]) -> str:
+    """Render key/value pairs into a compact single-line debug string."""
+    parts: list[str] = []
+    for k, v in fields.items():
+        if isinstance(v, str):
+            rendered = v.replace("\n", " ")
+            if len(rendered) > 180:
+                rendered = rendered[:180] + "..."
+        else:
+            rendered = str(v)
+        parts.append(f"{k}={rendered}")
+    return " | ".join(parts)
+
+
+def _state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    """Small, stable state snapshot for logs."""
+    flow = state.get("_flow") or {}
+    return {
+        "flow_name": flow.get("flow_name", "none"),
+        "flow_step": flow.get("current_step_index", -1),
+        "last_topic": state.get("_last_topic", ""),
+        "clarification_count": state.get("_clarification_count", 0),
+        "negative_sentiment_count": state.get("_negative_sentiment_count", 0),
+    }
+
+
+def _log_route(conversation_id: str, step: str, **fields: Any) -> None:
+    """Centralized route logger so each decision point is easy to follow."""
+    if not settings.route_debug_logs:
+        return
+    suffix = _format_log_fields(fields) if fields else ""
+    if suffix:
+        logger.info("[route][%s] %s | %s", conversation_id, step, suffix)
+    else:
+        logger.info("[route][%s] %s", conversation_id, step)
+
+
+# ── Agent response guardrails ─────────────────────────────────────────────
+
+# Patterns that indicate the LLM returned a raw error/technical response
+_ERROR_JSON_RE = re.compile(
+    r'^\s*\{[^}]*"error"\s*:\s*"[^"]*"\s*\}\s*$',
+    re.DOTALL,
+)
+_OUT_OF_SCOPE_RE = re.compile(
+    r"(no relevant banking knowledge|out of scope|not a banking|"
+    r"cannot (assist|help) with (that|this)|i (don't|do not) have information on that)\b",
+    re.IGNORECASE,
+)
+
+_FRIENDLY_FALLBACK = (
+    "I'm sorry, I can only assist with banking-related questions. "
+    "Please ask me about account services, loans, transfers, cards, or other banking topics. "
+    "If you need further help, I can connect you with a support agent."
+)
+
+
+def _is_error_response(text: str) -> bool:
+    """Return True if the assembled LLM response looks like a raw error/JSON."""
+    stripped = text.strip()
+    if _ERROR_JSON_RE.match(stripped):
+        return True
+    # Very short responses that are purely an error phrase
+    if len(stripped) < 120 and _OUT_OF_SCOPE_RE.search(stripped):
+        return True
+    return False
+
+
+def _make_guardrail_emit(base_emit_fn, conversation_id: str):
+    """
+    Wraps an emit_fn to intercept text_delta events.
+    Accumulates streamed text; if the final assembled response is a raw error
+    or out-of-scope JSON, suppresses it and emits a friendly fallback instead.
+    """
+    _buffer: list[str] = []
+    _flushed: list[bool] = [False]  # mutable flag
+    _finalized: list[bool] = [False]
+
+    async def _guardrail_emit(event: str, payload: Any) -> None:
+        if event == "text_delta":
+            delta = payload.get("delta")
+            if delta is None:
+                delta = payload.get("text", "")
+            if not isinstance(delta, str):
+                delta = str(delta or "")
+            _buffer.append(delta)
+            assembled = "".join(_buffer)
+            # Eagerly flush all buffered chunks once we have >120 chars of clearly valid text
+            if not _flushed[0] and len(assembled) > 120 and not _is_error_response(assembled):
+                _flushed[0] = True
+                # Flush every buffered chunk in order (including the current one)
+                for chunk in _buffer:
+                    if chunk:
+                        await base_emit_fn("text_delta", {"delta": chunk})
+                return
+            if _flushed[0]:
+                await base_emit_fn("text_delta", {"delta": delta})
+            # else: still buffering — wait for finish to decide
+            return
+
+        await base_emit_fn(event, payload)
+
+    async def _finalize_guardrail() -> None:
+        """
+        Flush any buffered text for short responses.
+        Needed because the socket agent loop returns usage to the router and does
+        not emit a "finish" event itself.
+        """
+        if _finalized[0]:
+            return
+        _finalized[0] = True
+
+        if _flushed[0]:
+            return
+
+        assembled = "".join(_buffer)
+        if not assembled.strip():
+            return
+
+        if _is_error_response(assembled):
+            logger.warning(
+                "[guardrail][%s] suppressed error response, sending friendly fallback | raw=%r",
+                conversation_id,
+                assembled[:200],
+            )
+            await base_emit_fn("text_delta", {"delta": _FRIENDLY_FALLBACK})
+            return
+
+        for chunk in _buffer:
+            if chunk:
+                await base_emit_fn("text_delta", {"delta": chunk})
+
+    return _guardrail_emit, _finalize_guardrail
 
 
 # ── Connection lifecycle ───────────────────────────────────────────────────
@@ -255,7 +406,7 @@ def _build_chips(classification, answer_tail: str = "") -> list[dict]:
     # 1. Yes/No chips when answer tail ends with a relevant question
     tail = answer_tail.strip()[-200:] if answer_tail else ""
     if tail.endswith("?") and _YN_QUESTION_RE.search(tail):
-        _add({"label": "Yes, please", "value": "Yes, please"})
+        _add({"label": "Yes, explain more", "value": "Please explain that in more detail"})
         _add({"label": "No, that's all", "value": "No, that's all I need"})
 
     # 2. Predictive chips from next_likely (LLM-generated per-message)
@@ -283,98 +434,228 @@ async def _route_message(
     session_state: dict | None,
 ) -> None:
     """
-    Routing decision tree. Mutates memory.session_state in-place.
+    Routing decision tree (classifier-first, conversation-act authority).
 
-    Performance path:
-      1. Active flow check (sync, <1ms) — handles own thinking_start
-      2. Emit thinking_start IMMEDIATELY (<100ms) — visible feedback before LLM
-      3. Fire classify_task + kb_task in parallel
-      4. Await classify_task; kb_task completes concurrently
-      5. Clarification / flow-activation routing
-      6. Inject KB into context with confidence gating
-      7. Run agent loop (no extra tool-decision call when KB is strong)
-      8. Emit finish with final chips
+    Order:
+      1. Track negative sentiment (sync, fast)
+      2. Emit thinking_start immediately
+      3. Classify intent + conversation act (LLM, with last_bot + active_flow context)
+      4. Route by assistant_action:
+         a. close_conversation  → inline closure, no chips, return
+         b. ask_clarification   → disambiguation question, yes/no chips, return
+         c. abort_flow          → force-abort active flow + confirm, return
+         d. re_explain          → re-explain loop, return
+         e. Active flow exists  → FlowEngine.advance(), return
+         f. Flow activation     → start flow, emit intro, return
+         g. Else                → KB prefetch + full agent loop
     """
     from app.agent.intent_classifier import (
         classify_intent,
-        detect_clarification,
-        detect_abort,
         detect_negative_sentiment,
     )
     from app.agent.flow_engine import FlowEngine
 
-    # ── Seed session state from client (cross-request continuity) ─────
+    # ── Seed session state from client (cross-request continuity) ─────────
     if session_state:
         memory.update_state(session_state)
 
     current_state = memory.get_state()
+    last_topic = str(current_state.get("_last_topic", "") or "")
+    _log_route(
+        conversation_id,
+        "start",
+        msg_preview=_redact_pii(raw_message[:120]),
+        msg_len=len(raw_message),
+        state=_state_snapshot(current_state),
+    )
 
-    # ── Track negative sentiment (sync, fast) ─────────────────────────
+    # ── 1. Track negative sentiment (sync, fast) ──────────────────────────
     if detect_negative_sentiment(raw_message):
         neg_count = int(current_state.get("_negative_sentiment_count", 0)) + 1
         current_state["_negative_sentiment_count"] = neg_count
         memory.update_state(current_state)
 
-    # ── 1. Active flow? (sync, no LLM needed) ────────────────────────
-    # Must run BEFORE thinking_start — flow handler manages its own thinking lifecycle.
-    engine = FlowEngine.from_session(current_state)
-    if engine:
-        await _handle_flow(
-            raw_message=raw_message,
-            memory=memory,
-            emit_fn=emit_fn,
-            engine=engine,
-            profile_name=profile_name,
-            extra_context=extra_context,
-            conversation_id=conversation_id,
-        )
-        return
-
-    # ── INSTANT: emit thinking_start <100ms ──────────────────────────
-    # Fires before any LLM calls so user sees feedback immediately.
+    # ── 2. INSTANT: emit thinking_start <100ms ────────────────────────────
     await emit_fn("thinking_start", {})
-
-    # ── 2. Fire parallel tasks ────────────────────────────────────────
     route_started = time.perf_counter()
+
+    # ── 3. Classify intent + conversation act ─────────────────────────────
+    last_bot = _get_last_bot_message(memory)
+    active_flow_name: str | None = current_state.get("_flow", {}).get("flow_name")
     is_first = len([m for m in memory.get_messages() if m.get("role") == "user"]) == 0
-    classify_task: asyncio.Task = asyncio.create_task(
-        classify_intent(
+    _log_route(
+        conversation_id,
+        "pre_classify",
+        is_first=is_first,
+        active_flow=active_flow_name or "none",
+        has_last_bot=bool(last_bot),
+    )
+
+    try:
+        classification = await classify_intent(
             message=raw_message,
             conversation_history=memory.get_messages(),
             is_first_message=is_first,
+            last_bot_message=last_bot,
+            active_flow_name=active_flow_name,
+            last_topic=last_topic,
         )
-    )
-    kb_task: asyncio.Task = asyncio.create_task(_prefetch_kb(raw_message))
-
-    # ── 3. Await classification (kb_task runs concurrently) ───────────
-    classify_wait_started = time.perf_counter()
-    try:
-        classification = await classify_task
     except Exception as exc:
         logger.warning("Intent classification failed: %s — defaulting to general_faq", exc)
-        kb_task.cancel()
         from app.agent.intent_classifier import ClassificationResult
         from app.agent.intent_taxonomy import FALLBACK_INTENT
         intent_def = FALLBACK_INTENT
         classification = ClassificationResult(
             intent="general_faq", confidence=0.4,
+            conversation_act="normal_banking_query",
+            assistant_action="answer_with_rag",
+            language="en", sentiment="neutral", reply_style="rag_answer",
+            should_end_conversation=False, should_abort_flow=False,
             is_clarification=False, is_abort=False, is_negative_sentiment=False,
             suggested_profile=intent_def.profile, flow_name=None,
             required_slots=[], suggested_actions=intent_def.suggested_actions,
         )
-    classify_wait_ms = (time.perf_counter() - classify_wait_started) * 1000
+
     logger.info(
-        "[%s] classify_intent wait=%.0f ms intent=%s confidence=%.2f",
+        "[%s] classify intent=%s act=%s action=%s conf=%.2f lang=%s",
         conversation_id,
-        classify_wait_ms,
         classification.intent,
+        classification.conversation_act,
+        classification.assistant_action,
         classification.confidence,
+        classification.language,
+    )
+    _log_route(
+        conversation_id,
+        "classification",
+        intent=classification.intent,
+        act=classification.conversation_act,
+        action=classification.assistant_action,
+        confidence=f"{classification.confidence:.2f}",
+        reply_style=classification.reply_style,
     )
 
-    # ── 4. Clarification request? ─────────────────────────────────────
-    last_bot = _get_last_bot_message(memory)
-    if last_bot and detect_clarification(raw_message, last_bot):
-        kb_task.cancel()
+    # ── Forced escalation chip/button path (deterministic HITL) ───────────
+    if _is_forced_escalation_chip(raw_message):
+        from app.tools.escalate_tool import EscalateInput, escalate_to_human
+
+        result = await escalate_to_human(
+            EscalateInput(
+                reason="User explicitly requested escalation via quick-reply chip/button.",
+                category="general",
+            ),
+            memory=memory,
+        )
+        final_text = result.split("Relay this to the user exactly:\n", 1)[-1].strip()
+        memory.add_user_message(raw_message)
+        await emit_fn("thinking_end", {})
+        await emit_fn("text_delta", {"delta": final_text})
+        await emit_fn("finish", {
+            "finishReason": "stop",
+            "usage": {"promptTokens": 0, "completionTokens": 0},
+            "suggestedActions": [],
+        })
+        memory.add_assistant_message(content=final_text)
+        _log_route(conversation_id, "finish_forced_escalation_chip")
+        return
+
+    # ── Classifier-directed escalation path (explicit user intent) ─────────
+    if classification.assistant_action == "escalate" or classification.intent == "escalation_request":
+        from app.tools.escalate_tool import EscalateInput, escalate_to_human
+
+        result = await escalate_to_human(
+            EscalateInput(
+                reason="User explicitly requested a human officer/agent.",
+                category="general",
+            ),
+            memory=memory,
+        )
+        final_text = result.split("Relay this to the user exactly:\n", 1)[-1].strip()
+        memory.add_user_message(raw_message)
+        await emit_fn("thinking_end", {})
+        await emit_fn("text_delta", {"delta": final_text})
+        await emit_fn("finish", {
+            "finishReason": "stop",
+            "usage": {"promptTokens": 0, "completionTokens": 0},
+            "suggestedActions": [],
+        })
+        memory.add_assistant_message(content=final_text)
+        _log_route(conversation_id, "finish_classifier_escalation")
+        return
+
+    # ── 4a. Conversation complete → inline closure, no chips ──────────────
+    if classification.assistant_action == "close_conversation":
+        if classification.language == "bn":
+            closure = "আপনাকে সহায়তা করতে পেরে ভালো লাগলো! যেকোনো সময় প্রয়োজন হলে নির্দ্বিধায় আমাদের সাথে যোগাযোগ করুন! শুভদিন কাটসুন!"
+        elif classification.language == "hinglish":
+            closure = "Khushi hui aapki madad karke! Kabhi bhi zaroorat ho toh humse baat karein. Take care!"
+        else:
+            closure = "You're welcome! Feel free to reach out anytime. Have a great day!"
+
+        memory.add_user_message(raw_message)
+        await emit_fn("thinking_end", {})
+        await emit_fn("text_delta", {"delta": closure})
+        await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
+        await emit_fn("finish", {
+            "finishReason": "stop",
+            "usage": {"promptTokens": 0, "completionTokens": 0},
+            "suggestedActions": [],
+        })
+        memory.add_assistant_message(content=closure)
+        logger.info("[%s] Closed conversation (language=%s)", conversation_id, classification.language)
+        _log_route(conversation_id, "finish_close", closure_preview=closure)
+        return
+
+    # ── 4b. Low-confidence disambiguation → ask clarifying question ───────
+    if classification.assistant_action == "ask_clarification":
+        if classification.language == "bn":
+            disambig = "ক্ষমাকরুন, আমি নিশ্চিত হতে চাইছি — আপনি কি সারা হয়েছেন, নাকি আরও কোনো সাহায্যের প্রয়োজন আছে?"
+        else:
+            disambig = "Just to confirm — are you all done, or is there something else I can help you with?"
+
+        yes_no_chips = [
+            {"label": "Yes, I'm done", "value": "No, that's all I need"},
+            {"label": "Help me with something else", "value": "I need help with something else"},
+        ]
+        memory.add_user_message(raw_message)
+        await emit_fn("thinking_end", {})
+        await emit_fn("text_delta", {"delta": disambig})
+        await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
+        await emit_fn("finish", {
+            "finishReason": "stop",
+            "usage": {"promptTokens": 0, "completionTokens": 0},
+            "suggestedActions": yes_no_chips,
+        })
+        memory.add_assistant_message(content=disambig)
+        _log_route(
+            conversation_id,
+            "finish_disambiguation",
+            reason="low_conf_terminal_action",
+            chips=[c["label"] for c in yes_no_chips],
+        )
+        return
+
+    # ── 4c. Abort active flow → force-abort + confirm ─────────────────────
+    if classification.assistant_action == "abort_flow":
+        engine = FlowEngine.from_session(current_state)
+        if engine:
+            _log_route(conversation_id, "branch_abort_flow", flow=active_flow_name or "none")
+            await _handle_flow(
+                raw_message=raw_message,
+                memory=memory,
+                emit_fn=emit_fn,
+                engine=engine,
+                profile_name=profile_name,
+                extra_context=extra_context,
+                conversation_id=conversation_id,
+                force_abort=True,
+            )
+            return
+        # No active flow to abort — fall through to normal routing
+        _log_route(conversation_id, "branch_abort_flow_skipped", reason="no_active_flow")
+
+    # ── 4d. Re-explain / clarification (classifier authority only) ────────
+    if classification.is_clarification and last_bot:
         clarif_count = int(current_state.get("_clarification_count", 0)) + 1
         current_state["_clarification_count"] = clarif_count
         memory.update_state(current_state)
@@ -386,10 +667,9 @@ async def _route_message(
             memory=memory,
             emit_fn=emit_fn,
             suggested_actions=classification.suggested_actions,
-            skip_initial_thinking=True,  # already emitted at top
+            skip_initial_thinking=True,
         )
 
-        # After 2nd clarification, offer human escalation
         if clarif_count >= 2:
             updated = memory.get_state()
             updated["suggested_actions"] = [
@@ -397,21 +677,48 @@ async def _route_message(
             ]
             memory.update_state(updated)
             await emit_fn("state", memory.get_state())
+        _log_route(conversation_id, "finish_reexplain", clarif_count=clarif_count)
         return
 
-    # ── 5. Store topic + check for flow activation ────────────────────
+    # ── 4e. Active flow exists → continue flow ────────────────────────────
+    engine = FlowEngine.from_session(current_state)
+    if engine:
+        _log_route(conversation_id, "branch_continue_flow", flow=active_flow_name or "none")
+        await _handle_flow(
+            raw_message=raw_message,
+            memory=memory,
+            emit_fn=emit_fn,
+            engine=engine,
+            profile_name=profile_name,
+            extra_context=extra_context,
+            conversation_id=conversation_id,
+            force_abort=False,
+        )
+        return
+
+    # ── 4f. Store topic + check for flow activation ───────────────────────
     current_state["_last_topic"] = classification.intent
     memory.update_state(current_state)
+    _log_route(
+        conversation_id,
+        "post_topic_store",
+        last_topic=classification.intent,
+        state=_state_snapshot(current_state),
+    )
 
     if classification.flow_name and classification.confidence >= 0.65:
-        kb_task.cancel()
         new_engine = FlowEngine.activate(classification.flow_name, current_state)
         memory.update_state(current_state)
+        _log_route(
+            conversation_id,
+            "branch_activate_flow",
+            flow=classification.flow_name,
+            confidence=f"{classification.confidence:.2f}",
+        )
 
         if new_engine:
             intro_text, first_quick_replies = new_engine.get_intro()
             memory.add_user_message(raw_message)
-            # thinking_start already emitted — just end it, then emit text
             await emit_fn("thinking_end", {})
             await emit_fn("text_delta", {"delta": intro_text})
             state_update = memory.get_state()
@@ -420,9 +727,20 @@ async def _route_message(
             await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
             await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": first_quick_replies or []})
             memory.add_assistant_message(content=intro_text)
+            _log_route(conversation_id, "finish_flow_intro", quick_replies=len(first_quick_replies or []))
             return
 
-    # ── 6. Await KB result (likely already done by now) ───────────────
+    # ── 4g. KB prefetch + full agent loop ────────────────────────────────
+    kb_task: asyncio.Task = asyncio.create_task(_prefetch_kb(raw_message))
+    _log_route(conversation_id, "branch_agent_loop", reason="no_flow_or_special_action")
+
+    async def _push_chips_bg() -> list[dict]:
+        chips = _build_chips(classification)
+        await emit_fn("chips_update", {"suggestedActions": chips})
+        return chips
+
+    chip_task: asyncio.Task = asyncio.create_task(_push_chips_bg())
+
     kb_wait_started = time.perf_counter()
     try:
         kb_context, kb_confidence = await asyncio.wait_for(kb_task, timeout=8.0)
@@ -432,23 +750,16 @@ async def _route_message(
     kb_wait_ms = (time.perf_counter() - kb_wait_started) * 1000
     logger.info(
         "[%s] kb_prefetch wait=%.0f ms confidence=%.2f context_len=%d",
+        conversation_id, kb_wait_ms, kb_confidence, len(kb_context),
+    )
+    _log_route(
         conversation_id,
-        kb_wait_ms,
-        kb_confidence,
-        len(kb_context),
+        "kb_prefetch_done",
+        wait_ms=f"{kb_wait_ms:.0f}",
+        kb_confidence=f"{kb_confidence:.2f}",
+        kb_context_len=len(kb_context),
     )
 
-    logger.debug("[%s] KB confidence=%.2f context_len=%d", conversation_id, kb_confidence, len(kb_context))
-
-    # ── 7. Fire chip-pusher task (emits chips_update mid-stream) ─────
-    async def _push_chips_bg() -> list[dict]:
-        chips = _build_chips(classification)
-        await emit_fn("chips_update", {"suggestedActions": chips})
-        return chips
-
-    chip_task: asyncio.Task = asyncio.create_task(_push_chips_bg())
-
-    # ── 8. Build enriched context ──────────────────────────────────────
     enriched_context = dict(extra_context or {})
     enriched_context.update({
         "_last_topic": current_state.get("_last_topic", ""),
@@ -456,46 +767,50 @@ async def _route_message(
         "_clarification_count": current_state.get("_clarification_count", 0),
         "_kb_context": kb_context,
         "_kb_confidence": kb_confidence,
+        "_assistant_action": classification.assistant_action,
+        "_conversation_act": classification.conversation_act,
+        "_classifier_confidence": classification.confidence,
+        "_last_bot_message": last_bot,
     })
 
-    # Surface greeting quick-replies for first message
     if is_first or classification.intent == "greeting":
         current_state["suggested_actions"] = classification.suggested_actions
         memory.update_state(current_state)
 
-    # ── 9. Run full agent loop (tools intact, KB pre-injected if confident) ──
+    guarded_emit, finalize_guardrail = _make_guardrail_emit(emit_fn, conversation_id)
     usage = await run_agent_loop_with_emitter(
         message=raw_message,
         conversation_id=conversation_id,
         memory=memory,
-        emit_fn=emit_fn,
+        emit_fn=guarded_emit,
         profile_name=profile_name,
         context=enriched_context,
-        session_state=None,  # already seeded above
+        session_state=None,
         suggested_actions=classification.suggested_actions or [],
-        skip_initial_thinking=True,  # already emitted at step 2
+        skip_initial_thinking=True,
     )
-    agent_loop_ms = (time.perf_counter() - route_started) * 1000 - classify_wait_ms - kb_wait_ms
+    await finalize_guardrail()
     logger.info(
-        "[%s] agent_loop approx=%.0f ms total_route=%.0f ms",
+        "[%s] agent_loop total_route=%.0f ms",
         conversation_id,
-        max(agent_loop_ms, 0.0),
         (time.perf_counter() - route_started) * 1000,
     )
+    _log_route(
+        conversation_id,
+        "agent_loop_done",
+        prompt_tokens=usage.get("promptTokens", 0),
+        completion_tokens=usage.get("completionTokens", 0),
+    )
 
-    # ── 10. Bulletproof chip timing ───────────────────────────────────
-    # Guarantee chips always appear even if classification resolved very late.
     if not chip_task.done():
         try:
             await asyncio.wait_for(asyncio.shield(chip_task), timeout=5.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             logger.warning("[%s] Chip task did not complete in time", conversation_id)
 
-    # Build final chips using answer tail for yes/no detection
     last_answer = _get_last_bot_message(memory) or ""
     final_chips = _build_chips(classification, answer_tail=last_answer[-200:])
 
-    # ── 11. Emit finish with merged chips ─────────────────────────────
     await emit_fn("finish", {
         "finishReason": "stop",
         "usage": {
@@ -504,6 +819,12 @@ async def _route_message(
         },
         "suggestedActions": final_chips,
     })
+    _log_route(
+        conversation_id,
+        "finish_agent",
+        final_chip_count=len(final_chips),
+        chip_labels=[c.get("label", "") for c in final_chips],
+    )
 
 
 async def _handle_flow(
@@ -514,15 +835,36 @@ async def _handle_flow(
     profile_name: str,
     extra_context: dict | None,
     conversation_id: str,
+    force_abort: bool = False,
 ) -> None:
     """Process a message against an active flow."""
     current_state = memory.get_state()
+    flow_state = current_state.get("_flow", {})
+    if settings.route_debug_logs:
+        logger.info(
+            "[flow][%s] enter | flow=%s | step=%s | force_abort=%s | input=%r",
+            conversation_id,
+            flow_state.get("flow_name", "none"),
+            flow_state.get("current_step_index", -1),
+            force_abort,
+            _redact_pii(raw_message[:120]),
+        )
     result = engine.advance(
         user_input=raw_message,
         session_state=current_state,
         bank_name=settings.bank_name,
+        force_abort=force_abort,
     )
     memory.update_state(current_state)
+    if settings.route_debug_logs:
+        logger.info(
+            "[flow][%s] result | aborted=%s | complete=%s | next_question=%r | quick_replies=%d",
+            conversation_id,
+            result.is_aborted,
+            result.is_complete,
+            (result.next_question or "")[:140],
+            len(result.quick_replies or []),
+        )
 
     memory.add_user_message(raw_message)
 

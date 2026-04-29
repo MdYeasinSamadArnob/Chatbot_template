@@ -37,7 +37,7 @@ from app.agent.flow_definitions import (
     format_date_range_label,
     get_flow,
 )
-from app.agent.intent_classifier import detect_abort
+# detect_abort removed — abort decisions are now made by the classifier/router
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,7 @@ class FlowEngine:
         user_input: str,
         session_state: dict,
         bank_name: str = "the bank",
+        force_abort: bool = False,
     ) -> FlowResult:
         """
         Process the user's response to the current flow step.
@@ -152,8 +153,8 @@ class FlowEngine:
         collected: dict[str, Any] = flow_state.setdefault("collected_slots", {})
         flow_state["last_activity_at"] = datetime.now(tz=timezone.utc).isoformat()
 
-        # ── Abort ──────────────────────────────────────────────────────
-        if detect_abort(user_input):
+        # ── Abort (force_abort set by router based on classifier decision) ────────
+        if force_abort:
             self.clear(session_state)
             return FlowResult(
                 next_question=self.flow.abort_confirmation,

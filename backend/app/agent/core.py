@@ -96,12 +96,43 @@ _DISMISSAL_REPLIES = [
     "Glad I could help. Have a great day!",
 ]
 
+_EXPLICIT_HUMAN_REQUEST_RE = re.compile(
+    r"\b(human|agent|officer|customer\s*service|support\s*agent|live\s*agent|representative|"
+    r"speak\s+to\s+(a\s+)?(human|agent)|connect\s+me|escalat|"
+    r"মানুষ|এজেন্ট|অফিসার|কাস্টমার\s*সার্ভিস)\b",
+    re.IGNORECASE,
+)
+
 def _is_dismissal(message: str) -> bool:
     return bool(_DISMISSAL_RE.match(message.strip()))
 
 def _dismissal_reply() -> str:
     import random
     return random.choice(_DISMISSAL_REPLIES)
+
+
+def _is_explicit_human_request(message: str) -> bool:
+    return bool(_EXPLICIT_HUMAN_REQUEST_RE.search((message or "").strip()))
+
+
+def _allow_escalation_tool_call(
+    user_message: str,
+    context: dict[str, Any],
+    call_args: dict[str, Any],
+) -> tuple[bool, str]:
+    """Gate escalate_to_human so it only fires on explicit HITL intent."""
+    action = str(context.get("_assistant_action", "") or "")
+    conv_act = str(context.get("_conversation_act", "") or "")
+    if _is_explicit_human_request(user_message):
+        return True, "explicit_user_request"
+    if action == "escalate" or conv_act in {"complaint_or_frustration"}:
+        return True, f"classifier_action={action or 'n/a'}"
+
+    reason = str(call_args.get("reason", "") or "")
+    if _EXPLICIT_HUMAN_REQUEST_RE.search(reason):
+        return True, "tool_reason_indicates_human_request"
+
+    return False, "blocked_non_explicit_escalation"
 
 
 # Known tool names (lower-cased for case-insensitive matching)
@@ -634,6 +665,14 @@ async def run_agent_loop(
                     f"Tool '{tc_name}' does not exist. "
                     "Stop calling tools. Answer the user directly from your general banking knowledge."
                 )
+            if tc_name == "escalate_to_human":
+                allowed, why = _allow_escalation_tool_call(message, context, tc_args)
+                if not allowed:
+                    logger.warning("[%s] escalation_blocked reason=%s", conversation_id, why)
+                    return tc_id, (
+                        "Escalation blocked: user did not explicitly request a human officer/agent. "
+                        "Continue helping with the current banking query without escalation."
+                    )
             result = await _execute_tool(tool_def, tc_args, memory)
             return tc_id, result
 
@@ -714,7 +753,7 @@ async def run_agent_loop_with_emitter(
         reply = _dismissal_reply()
         memory.add_user_message(message)
         memory.add_assistant_message(reply)
-        await emit_fn("text_delta", {"text": reply})
+        await emit_fn("text_delta", {"delta": reply})
         await emit_fn("message_complete", {"text": reply, "finish_reason": "stop"})
         return {"prompt_tokens": 0, "completion_tokens": 0}
 
@@ -890,6 +929,14 @@ async def run_agent_loop_with_emitter(
                     f"Tool '{tc_name}' does not exist. "
                     "Stop calling tools. Answer the user directly from your general banking knowledge."
                 )
+            if tc_name == "escalate_to_human":
+                allowed, why = _allow_escalation_tool_call(message, context, tc_args)
+                if not allowed:
+                    logger.warning("[%s] escalation_blocked reason=%s", conversation_id, why)
+                    return tc_id, (
+                        "Escalation blocked: user did not explicitly request a human officer/agent. "
+                        "Continue helping with the current banking query without escalation."
+                    )
             result = await _execute_tool(tool_def, tc_args, memory)
             return tc_id, result
 

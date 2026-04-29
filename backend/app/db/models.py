@@ -96,12 +96,13 @@ class EscalationTicket(Base):
     """Human-in-the-loop support tickets created when the bot escalates."""
     __tablename__ = "escalation_tickets"
 
-    ticket_id = Column(String(16), primary_key=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    user_id = Column(String(128), nullable=True)
     reason = Column(Text, nullable=False)
-    category = Column(String(64), nullable=False, default="general")
     # Status: "open" → human review pending; "resolved" → handled
     status = Column(String(32), nullable=False, default="open")
+    priority = Column(String(32), nullable=False, default="normal")
     metadata_ = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

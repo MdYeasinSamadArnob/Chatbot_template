@@ -57,5 +57,9 @@ class Settings(BaseSettings):
     # ── Banking branding ─────────────────────────────────────────────────
     bank_name: str = "MyBank"
 
+    # ── Debug logging ─────────────────────────────────────────────────────
+    # Enables step-by-step routing and classifier decision logs.
+    route_debug_logs: bool = True
+
 
 settings = Settings()

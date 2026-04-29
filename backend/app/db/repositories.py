@@ -71,13 +71,24 @@ async def create_escalation_ticket(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Insert a new escalation ticket."""
+    priority_map = {
+        "technical": "high",
+        "complaint": "high",
+        "account": "high",
+        "general": "normal",
+    }
     ticket = EscalationTicket(
-        ticket_id=ticket_id,
+        id=uuid.uuid4(),
         conversation_id=conversation_id,
+        user_id=None,
         reason=reason,
-        category=category,
         status="open",
-        metadata_=metadata or {},
+        priority=priority_map.get(category, "normal"),
+        metadata_={
+            "reference_code": ticket_id,
+            "category": category,
+            **(metadata or {}),
+        },
     )
     session.add(ticket)
     await session.commit()
@@ -96,10 +107,15 @@ async def list_escalation_tickets(
     rows = result.scalars().all()
     return [
         {
-            "ticket_id": r.ticket_id,
+            "ticket_id": (
+                (r.metadata_ or {}).get("reference_code")
+                if isinstance(r.metadata_, dict)
+                else str(r.id)
+            ),
             "conversation_id": str(r.conversation_id),
             "reason": r.reason,
-            "category": r.category,
+            "category": ((r.metadata_ or {}).get("category") if isinstance(r.metadata_, dict) else "general"),
+            "priority": r.priority,
             "status": r.status,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
