@@ -138,6 +138,15 @@ def _is_forced_escalation_chip(text: str) -> bool:
     return _normalize_user_text(text) in _FORCE_ESCALATION_CHIP_VALUES
 
 
+_SMALL_TALK_ROUTE_RE = re.compile(
+    r"\b(how\s+are\s+you|kemon\s+acho|kemon\s+asen|"
+    r"speak\s+in\s+bangla|speak\s+bangla|banglay\s+kotha|"
+    r"can\s+you\s+speak\s+(bangla|bengali)|"
+    r"amar\s+sathe\s+bangla(te)?\s+kotha\s+bolo)\b",
+    re.IGNORECASE,
+)
+
+
 def _format_log_fields(fields: dict[str, Any]) -> str:
     """Render key/value pairs into a compact single-line debug string."""
     parts: list[str] = []
@@ -305,7 +314,7 @@ async def connect(sid: str, environ: dict, auth: dict | None = None) -> None:
                 age = (datetime.now(tz=timezone.utc) - datetime.fromisoformat(started)).total_seconds() / 60
                 if age > FLOW_MAX_AGE_MINUTES:
                     state.pop("_flow", None)
-                    memory.update_state(state)
+                    memory.replace_state(state)
             except (ValueError, TypeError):
                 pass
 
@@ -768,6 +777,34 @@ async def _route_message(
         kb_task.cancel()
         return
 
+    # ── 4d2. Greeting/small-talk fast path (no active flow) ───────────────
+    # Avoids unnecessary LLM tool loop for pure greetings and language-style
+    # small-talk such as "hi", "how are you", "speak in bangla".
+    is_small_talk = bool(_SMALL_TALK_ROUTE_RE.search(raw_message))
+    if not active_flow_name and classification.intent == "greeting" and (
+        classification.conversation_act == "acknowledgement_only" or is_small_talk
+    ):
+        if classification.language == "bn" or re.search(r"বাংলা|bangla|bengali", raw_message, re.IGNORECASE):
+            reply = "জি, অবশ্যই। আমি বাংলায় কথা বলতে পারি। আপনি কী বিষয়ে সাহায্য চান?"
+        else:
+            reply = "Hi! I am doing well. How can I help you with banking today?"
+
+        greeting_chips = (classification.suggested_actions or [])[:4]
+
+        memory.add_user_message(raw_message)
+        await emit_fn("thinking_end", {})
+        await emit_fn("text_delta", {"delta": reply})
+        await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
+        await emit_fn("finish", {
+            "finishReason": "stop",
+            "usage": {"promptTokens": 0, "completionTokens": 0},
+            "suggestedActions": greeting_chips,
+        })
+        memory.add_assistant_message(content=reply)
+        _log_route(conversation_id, "finish_small_talk", chips=len(greeting_chips))
+        kb_task.cancel()
+        return
+
     # ── 4e. Active flow exists → continue flow ────────────────────────────
     engine = FlowEngine.from_session(current_state)
     if engine:
@@ -812,7 +849,7 @@ async def _route_message(
             await emit_fn("text_delta", {"delta": intro_text})
             state_update = memory.get_state()
             state_update.pop("suggested_actions", None)
-            memory.update_state(state_update)
+            memory.replace_state(state_update)
             await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
             await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": first_quick_replies or []})
             memory.add_assistant_message(content=intro_text)
@@ -945,7 +982,7 @@ async def _handle_flow(
         bank_name=settings.bank_name,
         force_abort=force_abort,
     )
-    memory.update_state(current_state)
+    memory.replace_state(current_state)
     if settings.route_debug_logs:
         logger.info(
             "[flow][%s] result | aborted=%s | complete=%s | next_question=%r | quick_replies=%d",
@@ -972,7 +1009,7 @@ async def _handle_flow(
         state_update = memory.get_state()
         state_update.pop("_flow", None)
         state_update.pop("suggested_actions", None)
-        memory.update_state(state_update)
+        memory.replace_state(state_update)
         await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
         await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": abort_chips})
         memory.add_assistant_message(content=result.next_question)
@@ -983,7 +1020,7 @@ async def _handle_flow(
         await emit_fn("text_delta", {"delta": result.completion_context})
         state_update = memory.get_state()
         state_update.pop("suggested_actions", None)
-        memory.update_state(state_update)
+        memory.replace_state(state_update)
         await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
         await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": []})
         memory.add_assistant_message(content=result.completion_context)
@@ -994,7 +1031,7 @@ async def _handle_flow(
         await emit_fn("text_delta", {"delta": result.next_question})
         state_update = memory.get_state()
         state_update.pop("suggested_actions", None)
-        memory.update_state(state_update)
+        memory.replace_state(state_update)
         await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
         await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": result.quick_replies or []})
         memory.add_assistant_message(content=result.next_question)

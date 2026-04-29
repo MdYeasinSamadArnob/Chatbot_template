@@ -149,6 +149,10 @@ class AgentMemory:
     def update_state(self, updates: dict[str, Any]) -> None:
         self._state.update(updates)
 
+    def replace_state(self, new_state: dict[str, Any]) -> None:
+        """Replace the full session state (supports key deletions)."""
+        self._state = dict(new_state)
+
     # ── Long-term memory ────────────────────────────────────────────────────
 
     def remember(self, task: str, output: str) -> None:

@@ -63,6 +63,15 @@ _GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Friendly small-talk that should NOT be treated as clarification.
+_SMALL_TALK_RE = re.compile(
+    r"\b(how\s+are\s+you|kemon\s+acho|kemon\s+asen|"
+    r"speak\s+in\s+bangla|speak\s+bangla|banglay\s+kotha|"
+    r"can\s+you\s+speak\s+(bangla|bengali)|"
+    r"amar\s+sathe\s+bangla(te)?\s+kotha\s+bolo)\b",
+    re.IGNORECASE,
+)
+
 _AFFIRMATIVE_SHORT_RE = re.compile(
     r"^\s*(yes|yes\s+please|yeah|yep|sure|okay|ok|continue|go\s+ahead|হ্যাঁ|জি|ঠিক\s+আছে|acha|haan)\s*[.!]*\s*$",
     re.IGNORECASE,
@@ -138,6 +147,10 @@ def detect_clarification(message: str, last_bot_message: str) -> bool:
     """Detect re-explanation requests without an LLM call."""
     msg = message.strip()
 
+    # Greeting/small-talk should never be interpreted as clarification.
+    if _GREETING_RE.match(msg) or _SMALL_TALK_RE.search(msg):
+        return False
+
     if _CLARIFICATION_RE.search(msg):
         return True
 
@@ -212,6 +225,31 @@ async def classify_intent(
             flow_name=intent_def.flow_name,
             required_slots=intent_def.required_slots,
             suggested_actions=intent_def.suggested_actions,
+        )
+
+    # Deterministic non-first-turn greeting/small-talk handling.
+    # Prevents expensive misroutes where "hi/how are you" is treated as
+    # clarification and triggers irrelevant RAG/tool calls.
+    if _GREETING_RE.match(msg) or _SMALL_TALK_RE.search(msg):
+        intent_def = INTENTS["greeting"]
+        return ClassificationResult(
+            intent="greeting",
+            confidence=0.95,
+            conversation_act="acknowledgement_only",
+            assistant_action="continue_flow",
+            language="bn" if re.search(r"বাংলা|bangla|bengali", msg, re.IGNORECASE) else "en",
+            sentiment="positive",
+            reply_style="rag_answer",
+            should_end_conversation=False,
+            should_abort_flow=False,
+            is_clarification=False,
+            is_abort=False,
+            is_negative_sentiment=False,
+            suggested_profile=intent_def.profile,
+            flow_name=intent_def.flow_name,
+            required_slots=intent_def.required_slots,
+            suggested_actions=intent_def.suggested_actions,
+            next_likely=[],
         )
 
     intent_list_lines = "\n".join(
