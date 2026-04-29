@@ -5,6 +5,7 @@ import { UserMessage } from "./UserMessage";
 import { AgentMessage } from "./AgentMessage";
 import { ToolCallMessage } from "./ToolCallMessage";
 import { ThinkingIndicator } from "./ThinkingIndicator";
+import { SourceBlocksMessage } from "./SourceBlocksMessage";
 
 interface Props {
   message: ChatMessage;
@@ -31,6 +32,9 @@ export function MessageDispatcher({ message }: Props) {
 
     case "tool_call":
       return <ToolCallMessage message={message} />;
+
+    case "source_blocks":
+      return <SourceBlocksMessage message={message} />;
 
     case "thinking":
       return <ThinkingIndicator />;

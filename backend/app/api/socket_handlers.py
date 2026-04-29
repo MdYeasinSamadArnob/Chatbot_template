@@ -13,6 +13,7 @@ Events emitted to client:
     text_delta            — { delta: str }
     tool_call             — { toolCallId, toolName, args }
     tool_result           — { toolCallId, result }
+    sources               — { sources: [...] }
     state                 — { todos, notes, context, suggested_actions?, ... }
     finish                — { finishReason, usage, suggestedActions }
     chips_update          — { suggestedActions: [{label, value}] }
@@ -28,6 +29,7 @@ Routing decision tree (executed before every agent loop call):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -41,6 +43,39 @@ from app.agent.profiles import list_profiles
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_kb_prefetch_payload(result: str) -> tuple[str, float]:
+    """Handle both legacy markdown and structured JSON from KB search tool."""
+    try:
+        payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+
+    if isinstance(payload, dict) and payload.get("kind") == "kb_search_result":
+        context_text = payload.get("context_markdown")
+        if not isinstance(context_text, str) or not context_text.strip():
+            return "", 0.0
+
+        sources = payload.get("sources")
+        if isinstance(sources, list):
+            n = len(sources)
+            confidence = 0.8 if n >= 2 else 0.55
+        else:
+            confidence = 0.4
+        return context_text, confidence
+
+    text = result or ""
+    if not text or "unavailable" in text.lower() or "No specific articles" in text:
+        return "", 0.0
+
+    match = re.search(r"Found (\d+) relevant", text)
+    if match:
+        n = int(match.group(1))
+        confidence = 0.8 if n >= 2 else 0.55
+    else:
+        confidence = 0.4
+    return text, confidence
 
 # ── Socket.IO server ───────────────────────────────────────────────────────
 
@@ -354,6 +389,36 @@ async def chat_message(sid: str, data: dict[str, Any]) -> None:
             await sio.emit("error", {"message": f"Internal server error: {exc}"}, to=sid)
 
 
+# ── Chip relevance helpers ───────────────────────────────────────────────
+
+# Detects when the agent's answer signals it found no KB content for the topic.
+# Used to suppress misleading intent-specific chips (e.g. "Apply for loan"
+# after the agent said it has no loan info).
+_NO_KB_DATA_RE = re.compile(
+    r"("
+    r"don['’]?t have (specific |)(information|info|details|data)"
+    r"|(no|not|n['’]t) (specific |relevant |)(information|info|articles|content|data) (on|about|for|regarding)"
+    r"|not (available|found) in (my |)(current |)(knowledge|database|knowledge base)"
+    r"|cannot find (any |specific |)(information|info|details)"
+    r"|contact .{0,40}support"
+    r"|contact .{0,40}helpline"
+    r"|unfortunately[, ].{0,30}(don['’]?t|do not|cannot)"
+    r"|i['’]?m (sorry|afraid)[,.] ?(but |)(i |)?(don['’]?t|do not|cannot|have no)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Generic navigation chips shown when KB had no relevant data.
+# These map to topics that are actually documented in the knowledge base.
+_NO_DATA_FALLBACK_CHIPS: list[dict] = [
+    {"label": "Transfer money",    "value": "How do I transfer money to another account?"},
+    {"label": "Check my balance",  "value": "How do I check my balance?"},
+    {"label": "Card services",     "value": "I need help with my card"},
+    {"label": "Account services",  "value": "How do I open a bank account?"},
+    {"label": "Speak to an agent", "value": "I want to speak to a support agent"},
+]
+
+
 # ── KB pre-fetch helper ────────────────────────────────────────────────────
 
 async def _prefetch_kb(query: str) -> tuple[str, float]:
@@ -366,18 +431,9 @@ async def _prefetch_kb(query: str) -> tuple[str, float]:
     try:
         from app.tools.vector_search import search_banking_knowledge, VectorSearchInput
         result = await search_banking_knowledge(VectorSearchInput(query=query, top_k=3))
-        if not result or "unavailable" in result.lower() or "No specific articles" in result:
-            return "", 0.0
-        # Estimate confidence from KB response content
-        match = re.search(r"Found (\d+) relevant", result)
-        if match:
-            n = int(match.group(1))
-            confidence = 0.8 if n >= 2 else 0.55
-        else:
-            # Keyword-fallback response (no "Found N" header) — lower confidence
-            confidence = 0.4
-        logger.debug("[KB prefetch] confidence=%.2f result_len=%d", confidence, len(result))
-        return result, confidence
+        context_text, confidence = _extract_kb_prefetch_payload(result)
+        logger.debug("[KB prefetch] confidence=%.2f result_len=%d", confidence, len(context_text))
+        return context_text, confidence
     except Exception as exc:
         logger.warning("KB prefetch failed: %s", exc)
         return "", 0.0
@@ -389,9 +445,15 @@ def _build_chips(classification, answer_tail: str = "") -> list[dict]:
     """
     Build quick-reply chips from:
       1. Yes/No detection on last 200 chars of answer
-      2. next_likely intent chips (LLM-predicted follow-ups)
-      3. Current intent's suggested_actions
+      2. next_likely intent chips (LLM-predicted follow-ups)  ─┐ skipped when
+      3. Current intent's suggested_actions                    ─┘ agent had no KB data
     Deduplicates by 'value', caps at 6.
+
+    When the answer indicates the agent found no relevant KB content ("I don't
+    have specific information..."), steps 2 and 3 are replaced with generic
+    navigation chips that map to topics actually in the knowledge base.  This
+    prevents misleading chips like "Apply for loan" appearing after an answer
+    that admitted there is no loan information available.
     """
     from app.agent.intent_taxonomy import INTENTS
     chips: list[dict] = []
@@ -403,23 +465,36 @@ def _build_chips(classification, answer_tail: str = "") -> list[dict]:
             seen.add(v)
             chips.append(chip)
 
-    # 1. Yes/No chips when answer tail ends with a relevant question
     tail = answer_tail.strip()[-200:] if answer_tail else ""
+
+    # Detect whether the agent admitted it had no KB data for this topic.
+    # When true, intent-specific chips would be misleading so we substitute
+    # generic navigation chips instead.
+    no_kb_data = bool(tail and _NO_KB_DATA_RE.search(tail))
+
+    # 1. Yes/No chips when answer tail ends with a relevant question
     if tail.endswith("?") and _YN_QUESTION_RE.search(tail):
         _add({"label": "Yes, explain more", "value": "Please explain that in more detail"})
         _add({"label": "No, that's all", "value": "No, that's all I need"})
 
-    # 2. Predictive chips from next_likely (LLM-generated per-message)
-    for intent_name in (getattr(classification, "next_likely", None) or [])[:2]:
-        intent_def = INTENTS.get(intent_name)
-        if intent_def and intent_def.suggested_actions:
-            _add(intent_def.suggested_actions[0])
+    if no_kb_data:
+        # Skip intent chips — offer useful navigation to topics we CAN answer
+        for chip in _NO_DATA_FALLBACK_CHIPS:
+            _add(chip)
+            if len(chips) >= 6:
+                break
+    else:
+        # 2. Predictive chips from next_likely (LLM-generated per-message)
+        for intent_name in (getattr(classification, "next_likely", None) or [])[:2]:
+            intent_def = INTENTS.get(intent_name)
+            if intent_def and intent_def.suggested_actions:
+                _add(intent_def.suggested_actions[0])
 
-    # 3. Current intent chips
-    for chip in (classification.suggested_actions or []):
-        _add(chip)
-        if len(chips) >= 6:
-            break
+        # 3. Current intent chips
+        for chip in (classification.suggested_actions or []):
+            _add(chip)
+            if len(chips) >= 6:
+                break
 
     return chips[:6]
 
@@ -478,6 +553,13 @@ async def _route_message(
     # ── 2. INSTANT: emit thinking_start <100ms ────────────────────────────
     await emit_fn("thinking_start", {})
     route_started = time.perf_counter()
+
+    # Start KB prefetch immediately — runs in parallel with classify_intent.
+    # For the common 4g (RAG) path the embedding + DB query (~400ms–2s) will
+    # finish during the 9-11s classification LLM call, so by the time we reach
+    # step 4g the result is already available (≈0ms extra wait).
+    # All early-return branches (4a–4f) cancel this task before returning.
+    kb_task: asyncio.Task = asyncio.create_task(_prefetch_kb(raw_message))
 
     # ── 3. Classify intent + conversation act ─────────────────────────────
     last_bot = _get_last_bot_message(memory)
@@ -557,6 +639,7 @@ async def _route_message(
         })
         memory.add_assistant_message(content=final_text)
         _log_route(conversation_id, "finish_forced_escalation_chip")
+        kb_task.cancel()
         return
 
     # ── Classifier-directed escalation path (explicit user intent) ─────────
@@ -581,6 +664,7 @@ async def _route_message(
         })
         memory.add_assistant_message(content=final_text)
         _log_route(conversation_id, "finish_classifier_escalation")
+        kb_task.cancel()
         return
 
     # ── 4a. Conversation complete → inline closure, no chips ──────────────
@@ -604,6 +688,7 @@ async def _route_message(
         memory.add_assistant_message(content=closure)
         logger.info("[%s] Closed conversation (language=%s)", conversation_id, classification.language)
         _log_route(conversation_id, "finish_close", closure_preview=closure)
+        kb_task.cancel()
         return
 
     # ── 4b. Low-confidence disambiguation → ask clarifying question ───────
@@ -633,6 +718,7 @@ async def _route_message(
             reason="low_conf_terminal_action",
             chips=[c["label"] for c in yes_no_chips],
         )
+        kb_task.cancel()
         return
 
     # ── 4c. Abort active flow → force-abort + confirm ─────────────────────
@@ -650,6 +736,7 @@ async def _route_message(
                 conversation_id=conversation_id,
                 force_abort=True,
             )
+            kb_task.cancel()
             return
         # No active flow to abort — fall through to normal routing
         _log_route(conversation_id, "branch_abort_flow_skipped", reason="no_active_flow")
@@ -678,6 +765,7 @@ async def _route_message(
             memory.update_state(updated)
             await emit_fn("state", memory.get_state())
         _log_route(conversation_id, "finish_reexplain", clarif_count=clarif_count)
+        kb_task.cancel()
         return
 
     # ── 4e. Active flow exists → continue flow ────────────────────────────
@@ -694,6 +782,7 @@ async def _route_message(
             conversation_id=conversation_id,
             force_abort=False,
         )
+        kb_task.cancel()
         return
 
     # ── 4f. Store topic + check for flow activation ───────────────────────
@@ -728,10 +817,11 @@ async def _route_message(
             await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": first_quick_replies or []})
             memory.add_assistant_message(content=intro_text)
             _log_route(conversation_id, "finish_flow_intro", quick_replies=len(first_quick_replies or []))
+            kb_task.cancel()
             return
 
     # ── 4g. KB prefetch + full agent loop ────────────────────────────────
-    kb_task: asyncio.Task = asyncio.create_task(_prefetch_kb(raw_message))
+    # kb_task was already created before classify_intent (parallel execution).
     _log_route(conversation_id, "branch_agent_loop", reason="no_flow_or_special_action")
 
     async def _push_chips_bg() -> list[dict]:
@@ -743,7 +833,7 @@ async def _route_message(
 
     kb_wait_started = time.perf_counter()
     try:
-        kb_context, kb_confidence = await asyncio.wait_for(kb_task, timeout=8.0)
+        kb_context, kb_confidence = await asyncio.wait_for(kb_task, timeout=2.5)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         kb_context, kb_confidence = "", 0.0
         logger.warning("[%s] KB prefetch timed out — LLM will use tools if needed", conversation_id)

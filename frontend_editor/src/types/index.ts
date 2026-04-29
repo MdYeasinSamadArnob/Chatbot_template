@@ -47,6 +47,7 @@ export type RenderBlock =
   | HeadingBlock
   | ListBlock
   | ImageBlock
+  | VideoBlock
   | CalloutBlock
   | CodeBlock
   | TableBlock
@@ -73,6 +74,14 @@ export interface ImageBlock {
   type: "image";
   url: string;
   alt: string;
+}
+
+export interface VideoBlock {
+  type: "video";
+  provider: "youtube";
+  url: string;
+  video_id: string;
+  title?: string;
 }
 
 export interface CalloutBlock {

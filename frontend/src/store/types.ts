@@ -4,7 +4,29 @@
 
 // ── Message types ──────────────────────────────────────────────────────────
 
-export type MessageType = "user_text" | "agent_text" | "tool_call" | "thinking";
+export type MessageType = "user_text" | "agent_text" | "tool_call" | "source_blocks" | "thinking";
+
+export type SourceRenderBlock =
+  | { type: "text"; content: string }
+  | { type: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; content: string }
+  | { type: "list"; variant?: "ordered" | "unordered"; items: string[] }
+  | { type: "image"; url: string; alt?: string }
+  | { type: "video"; provider?: "youtube"; url: string; title?: string }
+  | { type: "callout"; variant?: "info" | "warning" | "error" | "success" | "tip"; content: string }
+  | { type: "code"; content: string; language?: string }
+  | { type: "table"; headers?: string[]; rows?: string[][] }
+  | { type: "divider" };
+
+export interface RetrievedSource {
+  id: string;
+  document_title: string;
+  source_url?: string;
+  section_anchor?: string;
+  chunk_index?: number;
+  content_text?: string;
+  image_urls?: string[];
+  render_blocks?: SourceRenderBlock[];
+}
 
 interface BaseMessage {
   id: string;
@@ -36,6 +58,11 @@ export interface ToolCallMessage extends BaseMessage {
   status: "running" | "done" | "error";
 }
 
+export interface SourceBlocksMessage extends BaseMessage {
+  type: "source_blocks";
+  sources: RetrievedSource[];
+}
+
 export interface ThinkingMessage extends BaseMessage {
   type: "thinking";
 }
@@ -44,6 +71,7 @@ export type ChatMessage =
   | UserTextMessage
   | AgentTextMessage
   | ToolCallMessage
+  | SourceBlocksMessage
   | ThinkingMessage;
 // ── Quick replies ─────────────────────────────────────────────────────────────
 
@@ -86,6 +114,7 @@ export interface ChatStore {
   connectionStatus: ConnectionStatus;
   /** Quick-reply chips driven by the backend. Cleared when user sends a message. */
   suggestedActions: SuggestedAction[];
+  pendingSources: RetrievedSource[];
 
   // Actions
   addUserMessage: (text: string) => void;
@@ -102,5 +131,7 @@ export interface ChatStore {
   loadHistory: (messages: Array<{ role: string; content: string }>) => void;
   resetConversation: () => void;
   setSuggestedActions: (actions: SuggestedAction[]) => void;
+  setPendingSources: (sources: RetrievedSource[]) => void;
+  commitPendingSources: () => void;
 }
 

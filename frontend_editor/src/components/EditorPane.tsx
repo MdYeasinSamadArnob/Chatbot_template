@@ -12,6 +12,7 @@ import TableHeader from "@tiptap/extension-table-header";
 import TextAlign from "@tiptap/extension-text-align";
 import Highlight from "@tiptap/extension-highlight";
 import Placeholder from "@tiptap/extension-placeholder";
+import Youtube from "@tiptap/extension-youtube";
 import { EditorToolbar } from "./EditorToolbar";
 
 export interface EditorPaneRef {
@@ -39,6 +40,12 @@ export const EditorPane = forwardRef<EditorPaneRef, EditorPaneProps>(
         TableHeader,
         TextAlign.configure({ types: ["heading", "paragraph"] }),
         Highlight,
+        Youtube.configure({
+          controls: true,
+          nocookie: true,
+          modestBranding: true,
+          inline: false,
+        }),
         Placeholder.configure({
           placeholder: "Start writing your banking knowledge article…",
         }),

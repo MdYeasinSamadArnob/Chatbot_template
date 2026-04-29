@@ -27,6 +27,7 @@ type ListenEvents = {
   text_delta: (data: { delta?: string; text?: string }) => void;
   tool_call: (data: { toolCallId: string; toolName: string; args: Record<string, unknown>; announcement?: string }) => void;
   tool_result: (data: { toolCallId: string; result: string }) => void;
+  sources: (data: { sources: Array<Record<string, unknown>> }) => void;
   state: (data: Record<string, unknown>) => void;
   finish: (data: {
     finishReason: string;
@@ -68,7 +69,6 @@ export const socketClient = {
   },
 
   emit<K extends keyof EmitEvents>(event: K, data: EmitEvents[K]): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (getSocket() as any).emit(event, data);
   },
 

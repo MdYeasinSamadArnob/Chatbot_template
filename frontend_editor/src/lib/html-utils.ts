@@ -8,6 +8,7 @@
 
 import { parse, HTMLElement, Node, NodeType } from "node-html-parser";
 import type { RenderBlock } from "@/types";
+import { parseYouTubeVideoId } from "@/lib/video-utils";
 
 // ── HTML → Markdown ────────────────────────────────────────────────────────
 
@@ -53,6 +54,10 @@ export function htmlToMarkdown(html: string): string {
         const src = el.getAttribute("src") ?? "";
         const alt = el.getAttribute("alt") ?? "";
         return `![${alt}](${src})\n\n`;
+      }
+      case "iframe": {
+        const src = el.getAttribute("src") ?? "";
+        return src ? `[Video](${src})\n\n` : "";
       }
       case "ul": {
         const items = el
@@ -102,6 +107,66 @@ export function htmlToRenderBlocks(html: string): RenderBlock[] {
   const root = parse(html);
   const blocks: RenderBlock[] = [];
 
+  function pushTextBlock(content: string): void {
+    const trimmed = content.trim();
+    if (trimmed) blocks.push({ type: "text", content: trimmed });
+  }
+
+  function pushImageBlock(el: HTMLElement): void {
+    const url = el.getAttribute("src") ?? "";
+    if (!url) return;
+    blocks.push({ type: "image", url, alt: el.getAttribute("alt") ?? "" });
+  }
+
+  function pushVideoBlockFromIframe(el: HTMLElement): boolean {
+    const src = el.getAttribute("src") ?? "";
+    const videoId = parseYouTubeVideoId(src);
+    if (!src || !videoId) return false;
+    blocks.push({
+      type: "video",
+      provider: "youtube",
+      url: src,
+      video_id: videoId,
+      title: el.getAttribute("title") ?? undefined,
+    });
+    return true;
+  }
+
+  function processMixedInlineChildren(el: HTMLElement): void {
+    let textBuffer = "";
+
+    const flushText = () => {
+      pushTextBlock(textBuffer);
+      textBuffer = "";
+    };
+
+    el.childNodes.forEach((child) => {
+      if (child.nodeType === NodeType.TEXT_NODE) {
+        textBuffer += child.text;
+        return;
+      }
+
+      const childEl = child as HTMLElement;
+      const childTag = childEl.tagName?.toLowerCase() ?? "";
+      if (childTag === "img") {
+        flushText();
+        pushImageBlock(childEl);
+        return;
+      }
+      if (childTag === "iframe") {
+        flushText();
+        if (!pushVideoBlockFromIframe(childEl)) {
+          const src = childEl.getAttribute("src") ?? "";
+          if (src) pushTextBlock(src);
+        }
+        return;
+      }
+      textBuffer += childEl.text;
+    });
+
+    flushText();
+  }
+
   function processEl(el: HTMLElement): void {
     const tag = el.tagName?.toLowerCase() ?? "";
 
@@ -113,14 +178,7 @@ export function htmlToRenderBlocks(html: string): RenderBlock[] {
     }
 
     if (tag === "p") {
-      const img = el.querySelector("img");
-      if (img) {
-        const url = img.getAttribute("src") ?? "";
-        if (url) blocks.push({ type: "image", url, alt: img.getAttribute("alt") ?? "" });
-        return;
-      }
-      const content = el.text.trim();
-      if (content) blocks.push({ type: "text", content });
+      processMixedInlineChildren(el);
       return;
     }
 
@@ -143,8 +201,15 @@ export function htmlToRenderBlocks(html: string): RenderBlock[] {
     }
 
     if (tag === "img") {
-      const url = el.getAttribute("src") ?? "";
-      if (url) blocks.push({ type: "image", url, alt: el.getAttribute("alt") ?? "" });
+      pushImageBlock(el);
+      return;
+    }
+
+    if (tag === "iframe") {
+      if (!pushVideoBlockFromIframe(el)) {
+        const src = el.getAttribute("src") ?? "";
+        if (src) pushTextBlock(src);
+      }
       return;
     }
 

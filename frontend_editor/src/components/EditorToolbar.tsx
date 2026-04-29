@@ -1,6 +1,7 @@
 "use client";
 
 import { Editor } from "@tiptap/react";
+import { toYouTubeEmbedUrl } from "@/lib/video-utils";
 
 interface ToolbarProps {
   editor: Editor | null;
@@ -63,6 +64,17 @@ export function EditorToolbar({ editor }: ToolbarProps) {
 
   const insertTable = () =>
     editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+
+  const addYouTube = () => {
+    const input = window.prompt("YouTube URL:");
+    if (!input?.trim()) return;
+    const embedUrl = toYouTubeEmbedUrl(input);
+    if (!embedUrl) {
+      window.alert("Invalid YouTube URL. Use a youtube.com or youtu.be link.");
+      return;
+    }
+    editor.chain().focus().setYoutubeVideo({ src: embedUrl }).run();
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-0.5 border-b border-gray-200 px-2 py-1.5 bg-gray-50 shrink-0">
@@ -131,7 +143,7 @@ export function EditorToolbar({ editor }: ToolbarProps) {
 
       {/* Blocks */}
       <Btn active={editor.isActive("blockquote")} onClick={() => editor.chain().focus().toggleBlockquote().run()} title="Callout / Blockquote">
-        " "
+        ❝❞
       </Btn>
       <Btn active={editor.isActive("codeBlock")} onClick={() => editor.chain().focus().toggleCodeBlock().run()} title="Code block">
         {"{ }"}
@@ -148,6 +160,9 @@ export function EditorToolbar({ editor }: ToolbarProps) {
       </Btn>
       <Btn active={false} onClick={addImage} title="Insert image by URL">
         🖼
+      </Btn>
+      <Btn active={false} onClick={addYouTube} title="Insert YouTube video by URL">
+        ▶
       </Btn>
       <Btn active={false} onClick={insertTable} title="Insert table">
         ⊞

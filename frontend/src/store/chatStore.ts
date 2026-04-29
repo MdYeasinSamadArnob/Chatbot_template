@@ -50,6 +50,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   errorMessages: [],
   connectionStatus: "disconnected",
   suggestedActions: [],
+  pendingSources: [],
 
   // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -62,7 +63,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         timestamp: Date.now(),
       };
       // Clear quick-replies when user sends a message
-      return { messages: [...state.messages, msg], errorMessages: [], suggestedActions: [] };
+      return {
+        messages: [...state.messages, msg],
+        errorMessages: [],
+        suggestedActions: [],
+        pendingSources: [],
+      };
     }),
 
   addAgentTextDelta: (delta: string) =>
@@ -179,8 +185,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       sessionState: defaultSessionState(),
       errorMessages: [],
       suggestedActions: [],
+      pendingSources: [],
     }),
 
   setSuggestedActions: (actions: SuggestedAction[]) =>
     set({ suggestedActions: actions }),
+
+  setPendingSources: (sources) =>
+    set({ pendingSources: Array.isArray(sources) ? sources : [] }),
+
+  commitPendingSources: () =>
+    set((state) => {
+      if (!state.pendingSources.length) return state;
+      const msg = {
+        id: createId(),
+        type: "source_blocks" as const,
+        timestamp: Date.now(),
+        sources: state.pendingSources,
+      };
+      return {
+        messages: [...state.messages, msg],
+        pendingSources: [],
+      };
+    }),
 }));

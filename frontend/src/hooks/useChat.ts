@@ -11,6 +11,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { socketClient } from "@/lib/socketClient";
 import { useChatStore } from "@/store/chatStore";
+import type { RetrievedSource } from "@/store/types";
 
 export function useChat(conversationId?: string) {
   const store = useChatStore();
@@ -75,6 +76,13 @@ export function useChat(conversationId?: string) {
       store.toolCallEnd(toolCallId, result);
     });
 
+    socketClient.on("sources", (data) => {
+      const sources = Array.isArray(data?.sources) ? (data.sources as RetrievedSource[]) : [];
+      if (sources.length) {
+        store.setPendingSources(sources);
+      }
+    });
+
     socketClient.on("state", (data) => {
       // Extract suggested_actions before passing the rest to session state
       const { suggested_actions, ...sessionData } = data as any;
@@ -94,6 +102,7 @@ export function useChat(conversationId?: string) {
     socketClient.on("finish", (data) => {
       store.removeThinking();
       store.finishStreaming();
+      store.commitPendingSources();
       store.setProcessing(false);
       isProcessingRef.current = false;
       // Update quick-reply chips — delivered here to guarantee they reflect
@@ -130,6 +139,7 @@ export function useChat(conversationId?: string) {
       socketClient.off("text_delta");
       socketClient.off("tool_call");
       socketClient.off("tool_result");
+      socketClient.off("sources");
       socketClient.off("state");
       socketClient.off("error");
       socketClient.off("finish");

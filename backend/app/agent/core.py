@@ -162,6 +162,29 @@ _TOOL_ANNOUNCEMENTS: dict[str, str] = {
 }
 
 
+def _extract_kb_tool_payload(result: str) -> tuple[str, list[dict[str, Any]]] | None:
+    """Parse a structured KB tool payload and return markdown context + source blocks."""
+    try:
+        payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("kind") != "kb_search_result":
+        return None
+
+    context_markdown = payload.get("context_markdown")
+    sources = payload.get("sources")
+    if not isinstance(context_markdown, str):
+        return None
+    if not isinstance(sources, list):
+        sources = []
+
+    normalized_sources = [s for s in sources if isinstance(s, dict)]
+    return context_markdown, normalized_sources
+
+
 def _is_ollama() -> bool:
     """True when the configured API base is an Ollama instance."""
     url = settings.ollama_base_url.lower()
@@ -917,6 +940,8 @@ async def run_agent_loop_with_emitter(
                 ),
             })
 
+        tool_name_by_id = {tc_id: tc_name for tc_id, tc_name, _ in parsed_tool_calls}
+
         # Execute tools in parallel — track hallucinated (unregistered) tool names
         error_flags: dict[str, bool] = {"has_unregistered": False}
 
@@ -953,9 +978,18 @@ async def run_agent_loop_with_emitter(
 
         step_parts: list[dict] = []
         for tool_call_id, result in results:
-            memory.add_tool_result(tool_call_id, result)
+            tool_name = tool_name_by_id.get(tool_call_id, "")
+            kb_payload = _extract_kb_tool_payload(result) if tool_name in {"search_banking_knowledge", "vector_search"} else None
+
+            llm_result = result
+            if kb_payload:
+                llm_result, sources = kb_payload
+                if sources:
+                    await emit_fn("sources", {"sources": sources})
+
+            memory.add_tool_result(tool_call_id, llm_result)
             await emit_fn("tool_result", {"toolCallId": tool_call_id, "result": result})
-            step_parts.append({"toolCallId": tool_call_id, "result": result})
+            step_parts.append({"toolCallId": tool_call_id, "result": llm_result})
 
         memory.add_step(step_parts)
         # Emit inner state without suggested_actions — chips are delivered

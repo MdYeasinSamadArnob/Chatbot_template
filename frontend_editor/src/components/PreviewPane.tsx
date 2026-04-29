@@ -90,6 +90,26 @@ function Block({ block }: { block: RenderBlock }) {
         </figure>
       );
 
+    case "video":
+      return (
+        <figure className="my-2">
+          <div className="relative w-full overflow-hidden rounded-lg border border-gray-200 bg-black shadow-sm" style={{ paddingTop: "56.25%" }}>
+            <iframe
+              src={block.url}
+              title={block.title ?? "YouTube video"}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen
+              className="absolute left-0 top-0 h-full w-full"
+            />
+          </div>
+          {block.title && (
+            <figcaption className="text-xs text-gray-500 mt-1 text-center">
+              {block.title}
+            </figcaption>
+          )}
+        </figure>
+      );
+
     case "callout": {
       const styles: Record<string, string> = {
         info:    "bg-blue-50   border-blue-400   text-blue-800",

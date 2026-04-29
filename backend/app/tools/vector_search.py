@@ -1,5 +1,6 @@
 # Tool: search_banking_knowledge — PgVector RAG for banking help
 import asyncio
+import json
 import logging
 import time
 
@@ -232,6 +233,7 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
         )
 
     out = []
+    sources = []
     for row in rows:
         if row.chunk_embedding is None:
             continue
@@ -244,7 +246,32 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
         if row.source_url:
             chunk += f"\n\n[Learn more]({row.source_url})"
         out.append(chunk)
+
+        render_blocks = row.render_blocks if isinstance(row.render_blocks, list) else []
+        if not render_blocks and content:
+            render_blocks = [{"type": "text", "content": content}]
+            for url in (row.image_urls or []):
+                render_blocks.append({"type": "image", "url": url, "alt": "Step screenshot"})
+
+        sources.append({
+            "id": str(row.id),
+            "document_title": title,
+            "source_url": row.source_url,
+            "section_anchor": row.section_anchor,
+            "chunk_index": row.chunk_index,
+            "content_text": content,
+            "image_urls": row.image_urls or [],
+            "render_blocks": render_blocks,
+        })
+
     result_count = len(out)
     header = f"Found {result_count} relevant article{'s' if result_count != 1 else ''} from the knowledge base:\n\n"
     logger.info("KB search total elapsed_ms=%.0f query=%r results=%d", (time.perf_counter() - total_started) * 1000, args.query[:80], result_count)
-    return header + "\n\n---\n\n".join(out)
+    context_markdown = header + "\n\n---\n\n".join(out)
+
+    payload = {
+        "kind": "kb_search_result",
+        "context_markdown": context_markdown,
+        "sources": sources,
+    }
+    return json.dumps(payload, ensure_ascii=False)
