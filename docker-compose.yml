@@ -1,9 +1,10 @@
 # AI Orchestration Chatbot — Docker Compose
 #
 # Services:
-#   ollama   — Local LLM inference (http://localhost:11434)
-#   backend  — Python FastAPI agent (http://localhost:8000)
-#   frontend — Next.js UI           (http://localhost:3000)
+#   ollama      — Local LLM inference (http://localhost:11434)
+#   bot-socket  — Chat + Socket.IO API (DMZ, http://localhost:9001)
+#   admin-api   — KB admin API (MZ, http://localhost:9002)
+#   bot-ui      — Next.js chat UI (http://localhost:3001)
 #
 # Usage:
 #   docker compose up --build
@@ -42,41 +43,71 @@ services:
     restart: unless-stopped
     command: ["postgres", "-c", "shared_preload_libraries=pgvector"]
 
-  backend:
+  bot-socket:
     build:
-      context: ./backend
+      context: ./bot-socket
       dockerfile: Dockerfile
-    container_name: ai-chatbot-backend
+    container_name: bot-socket
     ports:
-      - "8000:8000"
+      - "9001:9001"
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - MODEL_NAME=ollama/llama3.2
-      - CORS_ORIGINS=["http://localhost:3000","http://frontend:3000"]
+      - CORS_ORIGINS=["http://localhost:3001","http://bot-ui:3000"]
       - MEMORY_PERSIST_DIR=/app/memory_store
       - POSTGRES_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/bankbot
       - EMBEDDING_MODEL=nomic-embed-text
+      - PORT=9001
     volumes:
-      - backend_memory:/app/memory_store
+      - bot_socket_memory:/app/memory_store
     depends_on:
       - ollama
       - postgres
     restart: unless-stopped
 
-  frontend:
+  admin-api:
     build:
-      context: ./frontend
+      context: ./admin-api
       dockerfile: Dockerfile
-    container_name: ai-chatbot-frontend
+    container_name: admin-api
     ports:
-      - "3000:3000"
+      - "9002:9002"
     environment:
-      - BACKEND_URL=http://backend:8000
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MODEL_NAME=ollama/llama3.2
+      - CORS_ORIGINS=["http://localhost:3002","http://admin-ui:3000","http://localhost:3001","http://bot-ui:3000"]
+      - MEMORY_PERSIST_DIR=/app/memory_store
+      - POSTGRES_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/bankbot
+      - EMBEDDING_MODEL=nomic-embed-text
+      - ADMIN_SECRET=Era-KB-Admin-2026-S3cr3t
+      - PORT=9002
+    volumes:
+      - admin_api_memory:/app/memory_store
     depends_on:
-      - backend
+      - ollama
+      - postgres
+    restart: unless-stopped
+
+  bot-ui:
+    build:
+      context: ./bot-ui
+      dockerfile: Dockerfile
+    container_name: bot-ui
+    ports:
+      - "3001:3000"
+    environment:
+      - BOT_SOCKET_URL=http://bot-socket:9001
+      - ADMIN_API_URL=http://admin-api:9002
+      - NEXT_PUBLIC_BOT_SOCKET_URL=http://localhost:9001
+      - NEXT_PUBLIC_ADMIN_UI_URL=http://localhost:3002
+      - ADMIN_SECRET=Era-KB-Admin-2026-S3cr3t
+    depends_on:
+      - bot-socket
+      - admin-api
     restart: unless-stopped
 
 volumes:
   ollama_models:
-  backend_memory:
+  bot_socket_memory:
+  admin_api_memory:
   postgres_data:

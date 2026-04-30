@@ -22,13 +22,15 @@ htmlcov/
 *.log
 
 # ── Virtual environments ─────────────────────────────────────────────────────
-backend/.venv/
+bot-socket/.venv/
+admin-api/.venv/
 .venv/
 venv/
 env/
 
 # ── Memory / SQLite stores ────────────────────────────────────────────────────
-backend/memory_store/
+bot-socket/memory_store/
+admin-api/memory_store/
 *.db
 *.sqlite
 *.sqlite3
@@ -37,14 +39,14 @@ backend/memory_store/
 # backend/app/db/alembic/versions/*.py  # uncomment if you want to ignore migrations
 
 # ── Node / Next.js ───────────────────────────────────────────────────────────
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/.turbo/
-frontend_editor/node_modules/
-frontend_editor/.next/
-frontend_editor/out/
-frontend_editor/.turbo/
+bot-ui/node_modules/
+bot-ui/.next/
+bot-ui/out/
+bot-ui/.turbo/
+admin-ui/node_modules/
+admin-ui/.next/
+admin-ui/out/
+admin-ui/.turbo/
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 docker-compose.override.yml

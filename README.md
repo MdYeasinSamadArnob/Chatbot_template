@@ -22,59 +22,71 @@ ollama pull llama3.2
 
 ---
 
-## 2. Backend
+## 2. Backends (Split)
 
-# Stop backend server by port
-fuser -k 9001/tcp
+From the repository root (`Chatbot_template`), run this once:
 
-# OR stop by process name/pattern
-pkill -f "uvicorn app.main:app --reload --port 9001"
+```bash
+# Create one shared virtualenv for both backend services
+python3 -m venv .venv
 
-```powershell
-cd Demo_Project\backend
-
-# Create virtual environment (first time only)
-py -m venv .venv
-
-# Activate
-.\.venv\Scripts\Activate.ps1        # Windows PowerShell
-# source .venv/bin/activate          # macOS / Linux
-
-# Install dependencies (first time only)
-pip install -r requirements.txt
-
-# Copy environment config (first time only)
-Copy-Item .env.example .env          # Windows
-# cp .env.example .env               # macOS / Linux
-
-# Start the backend (port 8000)
-uvicorn app.main:app --reload --port 9001
+# Install backend dependencies once
+.venv/bin/pip install -r bot-socket/requirements.txt
 ```
-uvicorn app.main:app --host 0.0.0.0 --port 9001 --reload
 
-API docs available at http://localhost:8000/docs
+Then start both backends in separate terminals:
+
+```bash
+# Terminal 1
+cd /home/arnob/Chatbot_template/bot-socket
+../.venv/bin/python -m app.main
+```
+
+```bash
+# Terminal 2
+cd /home/arnob/Chatbot_template/admin-api
+../.venv/bin/python -m app.main
+```
+
+Notes:
+- Both services read port from their `.env` files.
+- Expected ports: bot-socket `9001`, admin-api `9002`.
+- Do not run `source .env`; values are loaded by Pydantic settings.
+
+API docs available at:
+- bot-socket: http://localhost:9001/docs
+- admin-api: http://localhost:9002/docs
 
 ---
 
-## 3. Frontend
+## 3. Frontends
 
 Open a second terminal:
 
-```powershell
-cd Demo_Project\frontend
+```bash
+cd /home/arnob/Chatbot_template/bot-ui
 
 # Install dependencies (first time only)
 npm install
 
 # Copy environment config (first time only)
-Copy-Item .env.local.example .env.local    # Windows
-# cp .env.local.example .env.local         # macOS / Linux
+cp .env.local.example .env.local
 
-# Start the frontend (port 3000)
+# Start bot-ui (port 3001)
 npm run dev
 ```
 
-Open http://localhost:3000 — the chat sidebar opens by default.
+Open http://localhost:3001 — the chat sidebar opens by default.
+
+For the admin editor app:
+
+```bash
+cd /home/arnob/Chatbot_template/admin-ui
+npm install
+npm run dev
+```
+
+Open http://localhost:3002.
 
 ---
 
@@ -83,15 +95,16 @@ Open http://localhost:3000 — the chat sidebar opens by default.
 Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 
 ```bash
-cd Demo_Project
+cd /home/arnob/Chatbot_template
 docker compose up --build
 ```
 
-| Service  | URL                        |
-|----------|----------------------------|
-| Frontend | http://localhost:3000       |
-| Backend  | http://localhost:8000/docs  |
-| Ollama   | http://localhost:11434      |
+| Service    | URL                        |
+|------------|----------------------------|
+| Bot UI     | http://localhost:3001      |
+| Bot Socket | http://localhost:9001/docs |
+| Admin API  | http://localhost:9002/docs |
+| Ollama     | http://localhost:11434     |
 
 > On first run, pull the model inside the Ollama container:
 > ```bash
@@ -102,7 +115,7 @@ docker compose up --build
 
 ## 5. Adding a new tool
 
-1. Create `backend/app/tools/my_tool.py`:
+1. Create `bot-socket/app/tools/my_tool.py`:
 
 ```python
 from pydantic import BaseModel
@@ -116,7 +129,7 @@ async def my_tool(value: str) -> str:
     return f"Result: {value}"
 ```
 
-2. Register it in `backend/app/tools/__init__.py`:
+2. Register it in `bot-socket/app/tools/__init__.py`:
 
 ```python
 from app.tools import my_tool
@@ -129,17 +142,25 @@ from app.tools import my_tool
 ## Project structure
 
 ```
-Demo_Project/
-├── backend/
+Chatbot_template/
+├── bot-socket/
 │   ├── app/
 │   │   ├── agent/          # core.py (orchestration loop), memory, profiles, prompts, streaming
-│   │   ├── api/            # FastAPI routers
+│   │   ├── api/            # Chat + socket FastAPI routers
 │   │   ├── tools/          # calculator, datetime, web_search + registry
 │   │   ├── config.py
 │   │   └── main.py
 │   ├── requirements.txt
 │   └── .env.example
-├── frontend/
+├── admin-api/
+│   ├── app/
+│   │   ├── api/            # KB admin FastAPI routers
+│   │   ├── db/
+│   │   ├── tools/
+│   │   └── main.py
+│   ├── requirements.txt
+│   └── .env.example
+├── bot-ui/
 │   ├── src/
 │   │   ├── app/            # Next.js App Router pages + API proxy routes
 │   │   ├── components/     # ChatSidebar, ChatContainer, message components
@@ -147,5 +168,11 @@ Demo_Project/
 │   │   ├── lib/            # streaming (AI SDK v4 line protocol parser)
 │   │   └── store/          # Zustand chatStore + types
 │   └── .env.local.example
+├── admin-ui/
+│   ├── src/
+│   │   ├── app/            # Next.js App Router + admin proxy routes
+│   │   ├── components/     # EditorPane, PreviewPane, HistorySidebar
+│   │   └── lib/
+│   └── package.json
 └── docker-compose.yml
 ```
