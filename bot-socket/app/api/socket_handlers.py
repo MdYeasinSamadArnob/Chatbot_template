@@ -438,7 +438,14 @@ async def _prefetch_kb(query: str) -> tuple[str, float]:
                 0.4 = keyword fallback, 0.0 = no match / error.
     """
     try:
-        from app.tools.vector_search import search_banking_knowledge, VectorSearchInput
+        from app.tools.vector_search import (
+            search_banking_knowledge,
+            VectorSearchInput,
+            embedding_backend_degraded,
+        )
+        if embedding_backend_degraded():
+            logger.info("[KB prefetch] skipped: embedding backend degraded")
+            return "", 0.0
         result = await search_banking_knowledge(VectorSearchInput(query=query, top_k=3))
         context_text, confidence = _extract_kb_prefetch_payload(result)
         logger.debug("[KB prefetch] confidence=%.2f result_len=%d", confidence, len(context_text))
@@ -870,7 +877,20 @@ async def _route_message(
 
     kb_wait_started = time.perf_counter()
     try:
-        kb_context, kb_confidence = await asyncio.wait_for(kb_task, timeout=2.5)
+        from app.tools.vector_search import embedding_backend_degraded
+        degraded_before_prefetch = embedding_backend_degraded()
+    except Exception:
+        degraded_before_prefetch = False
+    prefetch_timeout_ms = (
+        settings.kb_prefetch_timeout_ms_degraded
+        if degraded_before_prefetch
+        else settings.kb_prefetch_timeout_ms
+    )
+    try:
+        kb_context, kb_confidence = await asyncio.wait_for(
+            kb_task,
+            timeout=max(0.1, prefetch_timeout_ms / 1000.0),
+        )
     except (asyncio.TimeoutError, asyncio.CancelledError):
         kb_context, kb_confidence = "", 0.0
         logger.warning("[%s] KB prefetch timed out — LLM will use tools if needed", conversation_id)
@@ -887,7 +907,14 @@ async def _route_message(
         kb_context_len=len(kb_context),
     )
 
+    try:
+        from app.tools.vector_search import embedding_backend_degraded
+        degraded_after_prefetch = embedding_backend_degraded()
+    except Exception:
+        degraded_after_prefetch = degraded_before_prefetch
+
     enriched_context = dict(extra_context or {})
+    disable_kb_tool = bool(settings.disable_kb_tool_when_embedding_down and degraded_after_prefetch)
     enriched_context.update({
         "_last_topic": current_state.get("_last_topic", ""),
         "_negative_sentiment_count": current_state.get("_negative_sentiment_count", 0),
@@ -898,7 +925,16 @@ async def _route_message(
         "_conversation_act": classification.conversation_act,
         "_classifier_confidence": classification.confidence,
         "_last_bot_message": last_bot,
+        "_disable_kb_tool": disable_kb_tool,
+        "_kb_unavailable": disable_kb_tool,
     })
+    logger.info(
+        "[%s] kb_degraded_state before_prefetch=%s after_prefetch=%s disable_kb_tool=%s",
+        conversation_id,
+        degraded_before_prefetch,
+        degraded_after_prefetch,
+        disable_kb_tool,
+    )
 
     if is_first or classification.intent == "greeting":
         current_state["suggested_actions"] = classification.suggested_actions
@@ -916,6 +952,8 @@ async def _route_message(
         suggested_actions=classification.suggested_actions or [],
         skip_initial_thinking=True,
     )
+    if not isinstance(usage, dict):
+        usage = {"promptTokens": 0, "completionTokens": 0}
     await finalize_guardrail()
     logger.info(
         "[%s] agent_loop total_route=%.0f ms",

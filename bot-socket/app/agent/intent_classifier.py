@@ -10,16 +10,81 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import time
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional
+from collections import OrderedDict
 
 from app.agent.intent_taxonomy import FALLBACK_INTENT, INTENTS, IntentDefinition
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ── Classifier cache (in-process, bounded LRU + TTL) ─────────────────────
+
+_CLASSIFIER_CACHE: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
+
+
+def _context_signature(
+    conversation_history: list[dict],
+    last_bot_message: str,
+    active_flow_name: str | None,
+    last_topic: str,
+) -> str:
+    recent = [
+        (m.get("role", ""), (m.get("content") or "")[:120])
+        for m in conversation_history
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ][-2:]
+    raw = json.dumps(
+        {
+            "recent": recent,
+            "last_bot": (last_bot_message or "")[:120],
+            "flow": active_flow_name or "",
+            "topic": last_topic or "",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _classifier_cache_key(
+    message: str,
+    conversation_history: list[dict],
+    last_bot_message: str,
+    active_flow_name: str | None,
+    last_topic: str,
+) -> str:
+    normalized = " ".join((message or "").strip().lower().split())
+    return f"{normalized}|{_context_signature(conversation_history, last_bot_message, active_flow_name, last_topic)}"
+
+
+def _cache_get(key: str) -> dict | None:
+    cached = _CLASSIFIER_CACHE.get(key)
+    if not cached:
+        return None
+    expires_at, payload = cached
+    if time.monotonic() >= expires_at:
+        _CLASSIFIER_CACHE.pop(key, None)
+        return None
+    _CLASSIFIER_CACHE.move_to_end(key)
+    return payload
+
+
+def _cache_set(key: str, payload: dict) -> None:
+    ttl = max(1, int(settings.classifier_cache_ttl_seconds))
+    _CLASSIFIER_CACHE[key] = (time.monotonic() + ttl, payload)
+    _CLASSIFIER_CACHE.move_to_end(key)
+    max_entries = max(32, int(settings.classifier_cache_max_entries))
+    while len(_CLASSIFIER_CACHE) > max_entries:
+        _CLASSIFIER_CACHE.popitem(last=False)
 
 
 # ── Regex patterns ─────────────────────────────────────────────────────────
@@ -197,6 +262,36 @@ async def classify_intent(
     to avoid silently ending or aborting on ambiguous input.
     """
     msg = message.strip()
+    cache_key = _classifier_cache_key(
+        message=msg,
+        conversation_history=conversation_history,
+        last_bot_message=last_bot_message,
+        active_flow_name=active_flow_name,
+        last_topic=last_topic,
+    )
+    cached = _cache_get(cache_key)
+    if cached:
+        intent_name = str(cached.get("intent", "general_faq"))
+        intent_def = INTENTS.get(intent_name, FALLBACK_INTENT)
+        return ClassificationResult(
+            intent=intent_name,
+            confidence=float(cached.get("confidence", 0.7)),
+            conversation_act=str(cached.get("conversation_act", "normal_banking_query")),
+            assistant_action=str(cached.get("assistant_action", "answer_with_rag")),
+            language=str(cached.get("language", "en")),
+            sentiment=str(cached.get("sentiment", "neutral")),
+            reply_style=str(cached.get("reply_style", "rag_answer")),
+            should_end_conversation=bool(cached.get("should_end_conversation", False)),
+            should_abort_flow=bool(cached.get("should_abort_flow", False)),
+            is_clarification=bool(cached.get("is_clarification", False)),
+            is_abort=bool(cached.get("is_abort", False)),
+            is_negative_sentiment=bool(cached.get("is_negative_sentiment", False)),
+            suggested_profile=intent_def.profile,
+            flow_name=intent_def.flow_name,
+            required_slots=intent_def.required_slots,
+            suggested_actions=intent_def.suggested_actions,
+            next_likely=list(cached.get("next_likely", []))[:2],
+        )
     if logger.isEnabledFor(logging.INFO):
         logger.info(
             "[classifier] start | msg=%r | is_first=%s | active_flow=%s | has_last_bot=%s",
@@ -272,8 +367,9 @@ async def classify_intent(
     last_bot_ctx = f'"{last_bot_message[:300]}"' if last_bot_message else "none"
 
     # Optional regex clarification hint (non-authoritative — passed to LLM as context only)
+    clarification_detected = detect_clarification(msg, last_bot_message)
     clarification_hint = ""
-    if detect_clarification(msg, last_bot_message):
+    if clarification_detected:
         clarification_hint = "\n[Hint: regex detected a possible clarification signal — verify with conversational context]"
         logger.info("[classifier] clarification_regex_hint=true")
 
@@ -356,7 +452,8 @@ async def classify_intent(
                 kwargs["extra_body"] = {"think": False}
 
         llm_start = time.perf_counter()
-        response = await acompletion(**kwargs)
+        timeout_seconds = max(0.5, float(settings.classifier_timeout_ms) / 1000.0)
+        response = await asyncio.wait_for(acompletion(**kwargs), timeout=timeout_seconds)
         llm_elapsed_ms = (time.perf_counter() - llm_start) * 1000
         raw = (response.choices[0].message.content or "").strip()
         logger.info(
@@ -389,11 +486,22 @@ async def classify_intent(
         else:
             logger.warning("[classifier] non_json_output | raw=%r", raw[:180])
 
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Intent classification timed out after %sms — defaulting to general_faq",
+            settings.classifier_timeout_ms,
+        )
     except Exception as exc:
         logger.warning(
             "Intent classification LLM call failed: %s — defaulting to general_faq",
             exc,
         )
+
+    if clarification_detected and assistant_action == "answer_with_rag":
+        conversation_act = "clarification_request"
+        assistant_action = "re_explain"
+        confidence = max(confidence, 0.7)
+        logger.info("[classifier] clarification_deterministic_fallback=true | action=re_explain")
 
     # Confidence fallback: never silently end or abort on low-confidence signals
     if confidence < 0.75 and assistant_action in ("close_conversation", "abort_flow"):
@@ -443,7 +551,7 @@ async def classify_intent(
         should_abort_flow,
     )
 
-    return ClassificationResult(
+    result = ClassificationResult(
         intent=intent_name,
         confidence=confidence,
         conversation_act=conversation_act,
@@ -462,3 +570,22 @@ async def classify_intent(
         suggested_actions=intent_def.suggested_actions,
         next_likely=next_likely,
     )
+    _cache_set(
+        cache_key,
+        {
+            "intent": result.intent,
+            "confidence": result.confidence,
+            "conversation_act": result.conversation_act,
+            "assistant_action": result.assistant_action,
+            "language": result.language,
+            "sentiment": result.sentiment,
+            "reply_style": result.reply_style,
+            "should_end_conversation": result.should_end_conversation,
+            "should_abort_flow": result.should_abort_flow,
+            "is_clarification": result.is_clarification,
+            "is_abort": result.is_abort,
+            "is_negative_sentiment": result.is_negative_sentiment,
+            "next_likely": result.next_likely,
+        },
+    )
+    return result

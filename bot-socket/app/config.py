@@ -41,6 +41,19 @@ class Settings(BaseSettings):
     # ── Embeddings ───────────────────────────────────────────────────────
     embedding_model: str = "nomic-embed-text"
     embedding_dims: int = 1024
+    embedding_attempts: int = 1
+    embedding_timeout_ms: int = 2200
+    embedding_cache_ttl_seconds: int = 900
+    embedding_cache_max_entries: int = 2048
+    vector_hnsw_ef_search: int = 96
+    vector_candidate_multiplier: int = 10
+    sparse_candidate_multiplier: int = 6
+    hybrid_dense_weight: float = 0.75
+    hybrid_sparse_weight: float = 0.25
+    hybrid_rrf_k: int = 60
+    hybrid_min_dense_similarity: float = 0.20
+    hybrid_lexical_boost: float = 0.12
+    hybrid_max_chunks_per_document: int = 2
 
     # ── Admin ───────────────────────────────────────────────────────────
     admin_secret: str = ""
@@ -53,6 +66,18 @@ class Settings(BaseSettings):
     # Leave empty to use model_name. Set to a small/fast model (e.g. llama3.2:3b)
     # to keep the main model for high-quality responses.
     classifier_model: str = ""
+
+    # ── Latency tuning ───────────────────────────────────────────────────
+    classifier_cache_ttl_seconds: int = 180
+    classifier_cache_max_entries: int = 1024
+    classifier_timeout_ms: int = 2800
+    kb_prefetch_timeout_ms: int = 1200
+    kb_prefetch_timeout_ms_degraded: int = 400
+    disable_kb_tool_when_embedding_down: bool = True
+
+    # ── Embedding backend circuit breaker ────────────────────────────────
+    embedding_breaker_failure_threshold: int = 3
+    embedding_breaker_cooldown_seconds: int = 45
 
     # ── Banking branding ─────────────────────────────────────────────────
     bank_name: str = "MyBank"

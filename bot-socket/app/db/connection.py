@@ -66,6 +66,13 @@ async def init_db() -> None:
             "ON knowledge_chunks (document_id)",
         ),
         (
+            "knowledge_chunks_fts_idx",
+            "CREATE INDEX IF NOT EXISTS knowledge_chunks_fts_idx "
+            "ON knowledge_chunks USING GIN ("
+            "to_tsvector('simple', coalesce(document_title, '') || ' ' || coalesce(content_text, ''))"
+            ")",
+        ),
+        (
             "knowledge_chunks_embedding_hnsw_idx",
             "CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_hnsw_idx "
             "ON knowledge_chunks USING hnsw (chunk_embedding vector_cosine_ops) "

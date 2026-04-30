@@ -814,7 +814,16 @@ async def run_agent_loop_with_emitter(
         else:
             logger.debug("[%s] KB not injected — confidence=%.2f \u2264 0.3", conversation_id, kb_conf)
 
+    if context.get("_kb_unavailable"):
+        system_prompt += (
+            "\n\n## Retrieval Status\n"
+            "Knowledge-base retrieval is temporarily unavailable for this turn. "
+            "Answer directly from reliable banking guidance and do not attempt KB tool calls."
+        )
+
     profile_tools = profile.get_tools()
+    if context.get("_disable_kb_tool"):
+        profile_tools = [t for t in profile_tools if t.name != "search_banking_knowledge"]
     tools_schema = [t.to_openai_tool() for t in profile_tools] if profile_tools else None
 
     prompt_tokens_total = 0
@@ -892,17 +901,40 @@ async def run_agent_loop_with_emitter(
                     await emit_fn("text_delta", {"delta": text_content})
             else:
                 # Streaming: token-by-token for the final answer
-                text_content, raw_tool_calls, iter_usage = await _stream_llm_with_emitter(
-                    messages, None, profile.temperature, emit_fn
-                )
-                prompt_tokens_total += iter_usage.get("prompt_tokens", 0)
-                completion_tokens_total += iter_usage.get("completion_tokens", 0)
-                if text_content:
-                    answer_text_parts.append(text_content)
+                try:
+                    text_content, raw_tool_calls, iter_usage = await _stream_llm_with_emitter(
+                        messages, None, profile.temperature, emit_fn
+                    )
+                    prompt_tokens_total += iter_usage.get("prompt_tokens", 0)
+                    completion_tokens_total += iter_usage.get("completion_tokens", 0)
+                    if text_content:
+                        answer_text_parts.append(text_content)
+                except Exception as stream_exc:
+                    # Some Ollama builds crash mid-stream (e.g. GGML_ASSERT). Retry once non-streaming.
+                    logger.warning(
+                        "[%s] streaming failed; retrying non-streaming fallback: %s",
+                        conversation_id,
+                        stream_exc,
+                    )
+                    response = await _call_llm(messages, None, profile.temperature)
+                    usage = response.usage
+                    prompt_tokens_total += getattr(usage, "prompt_tokens", 0) or 0
+                    completion_tokens_total += getattr(usage, "completion_tokens", 0) or 0
+                    choice = response.choices[0]
+                    msg = choice.message
+                    text_content = _strip_tool_artifacts(msg.content or "")
+                    raw_tool_calls = []
+                    if text_content:
+                        answer_text_parts.append(text_content)
+                        await emit_fn("thinking_end", {})
+                        await emit_fn("text_delta", {"delta": text_content})
         except Exception as exc:
             logger.error("[%s] LLM call failed: %s", conversation_id, exc)
             await emit_fn("error", {"message": f"LLM call failed: {exc}"})
-            return
+            return {
+                "promptTokens": prompt_tokens_total,
+                "completionTokens": completion_tokens_total,
+            }
 
         # ── 2. Persist assistant turn ──────────────────────────────────
         memory.add_assistant_message(
