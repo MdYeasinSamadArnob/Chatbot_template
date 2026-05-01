@@ -22,10 +22,10 @@ export default function RootLayout({
         {/* Android WebView full-screen capability */}
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-        <meta name="theme-color" content="#0A1628" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+        <meta name="theme-color" content="#ffffff" />
       </head>
-      <body className="h-full overflow-hidden bg-[#0A1628] text-gray-900 antialiased">
+      <body className="h-full overflow-hidden bg-[#EAECF0] text-gray-900 antialiased">
         {children}
       </body>
     </html>

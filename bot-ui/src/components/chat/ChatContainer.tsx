@@ -1,17 +1,16 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Shield } from "lucide-react";
+import { Sparkles, CreditCard, ArrowLeftRight, Lock, FileText } from "lucide-react";
 import { useChatStore } from "@/store/chatStore";
 import { MessageDispatcher } from "./messages/MessageDispatcher";
 import { QuickReplyBar } from "./QuickReplyBar";
 
-const BANKING_SUGGESTIONS = [
-  "How do I transfer money to another account?",
-  "How do I block or replace my card?",
-  "How do I set up mobile banking?",
-  "How do I update my personal details?",
-  "What are the loan and credit requirements?",
+const QUICK_ACTIONS = [
+  { label: "Check my balance", value: "How do I check my balance?", icon: CreditCard },
+  { label: "How to transfer", value: "How do I transfer money?", icon: ArrowLeftRight },
+  { label: "Change my PIN", value: "How do I change my PIN?", icon: Lock },
+  { label: "View transactions", value: "How do I view my transactions?", icon: FileText },
 ];
 
 interface Props {
@@ -29,7 +28,7 @@ export function ChatContainer({ onSuggestion }: Props) {
   }, [messages, suggestedActions]);
 
   return (
-    <div className="flex-1 overflow-y-auto overscroll-none flex flex-col">
+    <div className="flex-1 overflow-y-auto overscroll-none flex flex-col bg-[#EAECF0]">
       {messages.length === 0 ? (
         <EmptyState onSuggestion={onSuggestion} />
       ) : (
@@ -40,7 +39,7 @@ export function ChatContainer({ onSuggestion }: Props) {
         </div>
       )}
 
-      {/* Quick-reply chips — shown below last message, cleared on user send */}
+      {/* Quick-reply chips — shown below last message */}
       {suggestedActions.length > 0 && onSuggestion && (
         <div className="w-full max-w-[920px] mx-auto">
           <QuickReplyBar
@@ -58,28 +57,30 @@ export function ChatContainer({ onSuggestion }: Props) {
 
 function EmptyState({ onSuggestion }: { onSuggestion?: (t: string) => void }) {
   return (
-    <div className="flex flex-col items-center px-4 pt-10 pb-6 flex-1">
-      {/* Icon */}
-      <div className="w-14 h-14 rounded-2xl bg-[#1A56DB] flex items-center justify-center mb-4 shadow-lg">
-        <Shield size={26} className="text-white" />
+    <div className="flex flex-col items-center justify-center px-6 flex-1 gap-0">
+      {/* Sparkle icon */}
+      <div className="w-24 h-24 rounded-full bg-[#1A56DB] flex items-center justify-center mb-6 shadow-md">
+        <Sparkles size={42} className="text-white" strokeWidth={1.8} />
       </div>
-      <h3 className="text-base font-semibold text-gray-900 mb-1 text-center">
-        How can we help you?
-      </h3>
-      <p className="text-sm text-gray-500 leading-relaxed text-center max-w-[260px] mb-6">
-        Ask anything about your bank account, cards, transfers, loans, or services.
+
+      <h2 className="text-2xl font-bold text-[#1A56DB] mb-2 text-center">
+        BA Smart Assistant
+      </h2>
+      <p className="text-sm text-gray-500 text-center mb-10 leading-relaxed">
+        Ask me anything about<br />your banking needs
       </p>
 
-      {/* Suggestion chips */}
+      {/* 2×2 quick action grid */}
       {onSuggestion && (
-        <div className="w-full space-y-2">
-          {BANKING_SUGGESTIONS.map((s) => (
+        <div className="grid grid-cols-2 gap-3 w-full max-w-xs">
+          {QUICK_ACTIONS.map(({ label, value, icon: Icon }) => (
             <button
-              key={s}
-              onClick={() => onSuggestion(s)}
-              className="w-full text-left text-sm text-gray-700 bg-white border border-gray-200 hover:border-[#1A56DB] hover:bg-blue-50 rounded-2xl px-4 py-3 transition-colors shadow-sm active:scale-[0.98]"
+              key={value}
+              onClick={() => onSuggestion(value)}
+              className="flex items-center gap-2.5 bg-white rounded-2xl px-4 py-3.5 text-left text-sm text-gray-700 font-medium shadow-sm border border-gray-100 hover:border-[#1A56DB] hover:bg-blue-50 active:scale-[0.97] transition-all"
             >
-              {s}
+              <Icon size={18} className="text-[#1A56DB] flex-shrink-0" strokeWidth={1.8} />
+              <span className="leading-tight line-clamp-2">{label}</span>
             </button>
           ))}
         </div>

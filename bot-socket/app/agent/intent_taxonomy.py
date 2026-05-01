@@ -68,6 +68,11 @@ INTENTS: dict[str, IntentDefinition] = {
             "টাকা পাঠাতে চাই",
             "how to transfer",
             "wire transfer",
+            "ami taka pathate chai",
+            "taka pathabo",
+            "taka transfer korte chai",
+            "ami taka pathate chahchi",
+            "mane ami taka transfer korte chai",
         ],
     ),
     "check_balance": IntentDefinition(
@@ -87,6 +92,9 @@ INTENTS: dict[str, IntentDefinition] = {
             "ব্যালেন্স দেখাও",
             "account balance",
             "how much money do I have",
+            "ami balance dekhte chai",
+            "amar balance koto",
+            "balance check korte chai",
         ],
     ),
     "card_services": IntentDefinition(
@@ -109,6 +117,9 @@ INTENTS: dict[str, IntentDefinition] = {
             "কার্ড ব্লক করতে চাই",
             "stolen card",
             "activate my card",
+            "card block korte chai",
+            "amar card hariye geche",
+            "card activate korbo",
         ],
     ),
     "loan_inquiry": IntentDefinition(
@@ -131,6 +142,9 @@ INTENTS: dict[str, IntentDefinition] = {
             "credit",
             "EMI",
             "বন্ধক",
+            "ami loan nite chai",
+            "loan somporke jante chai",
+            "emi hisab koro",
         ],
     ),
     "complaint": IntentDefinition(
@@ -195,6 +209,11 @@ INTENTS: dict[str, IntentDefinition] = {
             "change address",
             "account opening",
             "একাউন্ট খুলতে চাই",
+            "ami account khulte chai",
+            "fdr account khulte chai",
+            "fdr somporke jante chai",
+            "fixed deposit somporke bolun",
+            "savings account khulte chai",
         ],
     ),
     "general_faq": IntentDefinition(

@@ -537,7 +537,9 @@ async def classify_intent(
         )
 
     intent_list_lines = "\n".join(
-        f"{name}: {defn.description}"
+        f"{name}: {defn.description}" + (
+            f" (e.g. {', '.join(repr(e) for e in defn.examples[:4])})" if defn.examples else ""
+        )
         for name, defn in INTENTS.items()
     )
 

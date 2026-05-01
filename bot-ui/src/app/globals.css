@@ -92,19 +92,80 @@ button, a {
 
 /* ── Markdown content inside agent messages ────────────────────────────── */
 .agent-markdown p {
-  margin-bottom: 0.5rem;
-  line-height: 1.6;
+  margin-bottom: 0.55rem;
+  line-height: 1.65;
 }
 .agent-markdown p:last-child {
   margin-bottom: 0;
 }
+
+/* ── Lists ─────────────────────────────────────────────────────────────── */
 .agent-markdown ul,
 .agent-markdown ol {
-  margin: 0.5rem 0 0.5rem 1.25rem;
+  margin: 0.6rem 0 0.6rem 0;
+  padding-left: 0;
+  list-style: none;
 }
-.agent-markdown li {
-  margin-bottom: 0.2rem;
+
+/* Unordered list — blue dot + indented text */
+.agent-markdown ul li {
+  position: relative;
+  padding-left: 1.25rem;
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
+  color: #1e293b;
 }
+.agent-markdown ul li::before {
+  content: "";
+  position: absolute;
+  left: 0.2rem;
+  top: 0.55em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #1A56DB;
+  flex-shrink: 0;
+}
+
+/* Ordered list — blue circled step numbers */
+.agent-markdown ol {
+  counter-reset: step-counter;
+}
+.agent-markdown ol li {
+  position: relative;
+  padding-left: 2rem;
+  margin-bottom: 0.45rem;
+  line-height: 1.6;
+  color: #1e293b;
+  counter-increment: step-counter;
+}
+.agent-markdown ol li::before {
+  content: counter(step-counter);
+  position: absolute;
+  left: 0;
+  top: 0.05em;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  background-color: #EEF2FF;
+  color: #1A56DB;
+  font-size: 0.72em;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Nested lists */
+.agent-markdown ul ul,
+.agent-markdown ol ul,
+.agent-markdown ul ol,
+.agent-markdown ol ol {
+  margin: 0.3rem 0 0.3rem 0.5rem;
+}
+
+/* ── Code ──────────────────────────────────────────────────────────────── */
 .agent-markdown code {
   background: #f1f5f9;
   padding: 0.1em 0.35em;
@@ -128,30 +189,63 @@ button, a {
   color: inherit;
   padding: 0;
 }
+
+/* ── Headings ──────────────────────────────────────────────────────────── */
 .agent-markdown h1,
 .agent-markdown h2,
 .agent-markdown h3 {
-  font-weight: 600;
-  margin: 0.75rem 0 0.35rem;
+  font-weight: 700;
+  margin: 0.85rem 0 0.4rem;
+  color: #0f172a;
+  line-height: 1.3;
 }
-.agent-markdown h1 { font-size: 1.1em; }
+.agent-markdown h1 { font-size: 1.05em; }
 .agent-markdown h2 { font-size: 1em; }
-.agent-markdown h3 { font-size: 0.95em; }
+.agent-markdown h3 { font-size: 0.95em; color: #1A56DB; }
+
+/* ── Blockquote — used for "Note:" callouts ────────────────────────────── */
 .agent-markdown blockquote {
-  border-left: 3px solid #e2e8f0;
-  margin: 0.5rem 0;
-  padding-left: 0.75rem;
-  color: #64748b;
+  border-left: 3px solid #1A56DB;
+  margin: 0.65rem 0;
+  padding: 0.4rem 0.75rem;
+  background: #EEF2FF;
+  border-radius: 0 6px 6px 0;
+  color: #334155;
+  font-size: 0.88em;
 }
+.agent-markdown blockquote p {
+  margin-bottom: 0;
+}
+
+/* ── Inline note pattern — "Note: ..." on its own line ─────────────────── */
+.agent-markdown p:has(> strong:first-child) {
+  padding: 0.35rem 0.6rem;
+  background: #EEF2FF;
+  border-left: 3px solid #1A56DB;
+  border-radius: 0 6px 6px 0;
+  color: #334155;
+  font-size: 0.88em;
+}
+
+/* ── Other inline ──────────────────────────────────────────────────────── */
 .agent-markdown a {
   color: #2563eb;
   text-decoration: underline;
 }
 .agent-markdown strong {
-  font-weight: 600;
+  font-weight: 700;
+  color: #0f172a;
+}
+.agent-markdown em {
+  color: #475569;
 }
 .agent-markdown hr {
   border: none;
   border-top: 1px solid #e2e8f0;
-  margin: 0.75rem 0;
+  margin: 0.85rem 0;
+}
+
+/* First child never has top margin — flush to bubble top */
+.agent-markdown > *:first-child {
+  margin-top: 0 !important;
 }

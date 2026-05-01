@@ -10,12 +10,6 @@ interface Props {
   isProcessing: boolean;
 }
 
-/**
- * Mobile-first chat input.
- * - Auto-resizing textarea
- * - safe-area-inset-bottom aware for Android/iOS notch
- * - 44px min touch target on send button (WCAG 2.5.5)
- */
 export function ChatEditor({ onSubmit, onCancel, isProcessing }: Props) {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -54,18 +48,18 @@ export function ChatEditor({ onSubmit, onCancel, isProcessing }: Props) {
 
   return (
     <div
-      className="flex-shrink-0 px-3 pt-2 pb-3 bg-white border-t border-gray-200"
+      className="flex-shrink-0 px-4 py-3 bg-white border-t border-gray-200"
       style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
     >
-      <div className="mx-auto w-full max-w-[920px] flex items-end gap-2 bg-[#F5F7FF] rounded-2xl border border-gray-200 focus-within:border-[#1A56DB] focus-within:ring-2 focus-within:ring-blue-100 transition-all px-4 py-2.5 shadow-sm">
+      <div className="flex items-end gap-3">
         <textarea
           ref={textareaRef}
           value={input}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder="Ask about banking services…"
+          placeholder="Ask me anything..."
           rows={1}
-          className="flex-1 bg-transparent resize-none outline-none text-sm text-gray-800 placeholder-gray-400 leading-relaxed"
+          className="flex-1 bg-transparent resize-none outline-none text-sm text-gray-800 placeholder-gray-400 leading-relaxed py-2"
           style={{ maxHeight: "10rem" }}
         />
 
@@ -74,15 +68,15 @@ export function ChatEditor({ onSubmit, onCancel, isProcessing }: Props) {
           disabled={!isProcessing && !canSend}
           title={isProcessing ? "Stop" : "Send"}
           className={clsx(
-            "min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full transition-all flex-shrink-0 active:scale-95",
+            "w-12 h-12 flex items-center justify-center rounded-full transition-all flex-shrink-0 active:scale-95",
             isProcessing
               ? "bg-red-100 text-red-600 hover:bg-red-200"
               : canSend
-              ? "bg-[#1A56DB] text-white hover:bg-[#1648c0] shadow-sm"
-              : "text-gray-300 cursor-not-allowed"
+              ? "bg-[#1A56DB] text-white hover:bg-[#1648c0] shadow-md"
+              : "bg-[#1A56DB] text-white opacity-60 cursor-not-allowed"
           )}
         >
-          {isProcessing ? <StopCircle size={18} /> : <Send size={17} />}
+          {isProcessing ? <StopCircle size={20} /> : <Send size={18} />}
         </button>
       </div>
     </div>
