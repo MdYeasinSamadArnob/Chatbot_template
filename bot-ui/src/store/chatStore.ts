@@ -11,6 +11,7 @@ import type {
   SessionState,
   SuggestedAction,
   ToolCallMessage,
+  UserContext,
   UserTextMessage,
   ThinkingMessage,
 } from "./types";
@@ -51,6 +52,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   connectionStatus: "disconnected",
   suggestedActions: [],
   pendingSources: [],
+  userContext: { isGuest: true },
 
   // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -217,4 +219,38 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingSources: [],
       };
     }),
-}));
+  setUserContext: (ctx: UserContext) => {
+    // Persist conv_id in localStorage with per-user key
+    if (ctx.userId && ctx.convId && typeof window !== "undefined") {
+      try {
+        localStorage.setItem(`ba_conv_id:${ctx.userId}`, ctx.convId);
+      } catch {
+        // localStorage unavailable (WebView restriction)
+      }
+    }
+    set({ userContext: ctx });
+  },
+
+  /** Replace the message list with a history payload from a previous conversation. */
+  loadHistoryPayload: (messages) =>
+    set(() => {
+      const chatMessages: ChatMessage[] = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => {
+          if (m.role === "user") {
+            return {
+              id: createId(),
+              type: "user_text",
+              text: m.content,
+              timestamp: Date.now(),
+            } as UserTextMessage;
+          }
+          return {
+            id: createId(),
+            type: "agent_text",
+            text: m.content,
+            timestamp: Date.now(),
+          } as AgentTextMessage;
+        });
+      return { messages: chatMessages };
+    }),}));

@@ -104,6 +104,30 @@ class AgentMemory:
         # ── Intent summary log (LLM-generated, max 10 entries) ──────────
         # Records what the user wanted and the outcome of each turn.
         self._intent_log: list[dict[str, Any]] = []
+
+        # ── User identity context (set on connect for authenticated users)
+        self._user_id: str | None = None
+        self._username: str | None = None
+        self._screen_context: str | None = None
+    # ── User identity ───────────────────────────────────────────────────────
+
+    def set_user_context(
+        self,
+        user_id: str | None,
+        username: str | None,
+        screen_context: str | None,
+    ) -> None:
+        self._user_id = user_id or None
+        self._username = username or None
+        self._screen_context = screen_context or None
+
+    def get_user_context(self) -> dict[str, str | None]:
+        return {
+            "user_id": self._user_id,
+            "username": self._username,
+            "screen_context": self._screen_context,
+        }
+
     # ── Message management ──────────────────────────────────────────────────
 
     def add_user_message(self, content: str) -> None:

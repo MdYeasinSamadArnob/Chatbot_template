@@ -5,9 +5,12 @@ import { ArrowLeft, Trash2 } from "lucide-react";
 interface Props {
   onReset: () => void;
   hasMessages: boolean;
+  username?: string;
 }
 
-export function ChatHeader({ onReset, hasMessages }: Props) {
+export function ChatHeader({ onReset, hasMessages, username }: Props) {
+  const firstName = username ? username.trim().split(" ")[0] : null;
+
   return (
     <div className="flex items-center h-14 px-2 bg-white border-b border-gray-200 flex-shrink-0">
       {/* Back arrow */}
@@ -19,10 +22,17 @@ export function ChatHeader({ onReset, hasMessages }: Props) {
         <ArrowLeft size={22} strokeWidth={2} />
       </button>
 
-      {/* Centered title */}
-      <h1 className="flex-1 text-center text-base font-bold text-gray-900 tracking-tight">
-        BA Smart Assistant
-      </h1>
+      {/* Centered title + optional greeting subtitle */}
+      <div className="flex-1 flex flex-col items-center">
+        <h1 className="text-base font-bold text-gray-900 tracking-tight leading-tight">
+          BA Smart Assistant
+        </h1>
+        {firstName && (
+          <p className="text-xs text-[#1A56DB] font-medium leading-tight">
+            Hi, {firstName}!
+          </p>
+        )}
+      </div>
 
       {/* Trash — only visible when there are messages */}
       {hasMessages ? (

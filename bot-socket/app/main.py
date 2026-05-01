@@ -52,6 +52,13 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Embedding warmup error: %s", exc)
 
+    # Initialise Redis session store (best-effort — system works without Redis)
+    try:
+        from app.session.redis_store import get_redis_store
+        await get_redis_store().init()
+    except Exception as exc:
+        logger.warning("Redis init error (non-fatal): %s", exc)
+
     from app.tools.registry import registry
     logger.info(
         "Bot Socket API starting. Model=%s  Tools=%s",

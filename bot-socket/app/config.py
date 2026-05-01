@@ -58,6 +58,20 @@ class Settings(BaseSettings):
     # ── Admin ───────────────────────────────────────────────────────────
     admin_secret: str = ""
 
+    # ── Session / identity ───────────────────────────────────────────────
+    # SESSION_SECRET: required when authenticated users connect (HMAC signing).
+    # Startup will fail with a clear error if this is missing and a signed
+    # connection arrives.  Guest sessions (no user_id) never check this.
+    session_secret: str = ""
+
+    # Redis: optional.  If unset, the system falls back to PostgreSQL + in-memory.
+    redis_url: str | None = None
+    redis_timeout: float = 1.0          # socket / connect timeout in seconds
+
+    # HMAC replay-window: reject tokens older than this many seconds (±).
+    # 120 s (±2 min) is enough to absorb typical mobile clock drift.
+    hmac_clock_skew: int = 120
+
     # ── LLM thinking mode (Qwen3 / extended-reasoning models) ───────────
     # Set to False to disable chain-of-thought / thinking tokens.
     llm_thinking: bool = False

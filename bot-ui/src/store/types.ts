@@ -83,7 +83,17 @@ export interface SuggestedAction {
 // ── Connection state ───────────────────────────────────────────────────────
 
 export type ConnectionStatus = "connected" | "disconnected" | "reconnecting";
+// ── User identity context ───────────────────────────────────────────────────
 
+export interface UserContext {
+  userId?: string;
+  username?: string;
+  screenContext?: string;
+  isGuest: boolean;
+  convId?: string;
+  hasPreviousSession?: boolean;
+  prevConvId?: string;
+}
 // ── Session state ──────────────────────────────────────────────────────────
 
 export interface SessionState {
@@ -135,5 +145,9 @@ export interface ChatStore {
   setSuggestedActions: (actions: SuggestedAction[]) => void;
   setPendingSources: (sources: RetrievedSource[]) => void;
   commitPendingSources: () => void;
+  // User identity
+  userContext: UserContext;
+  setUserContext: (ctx: UserContext) => void;
+  loadHistoryPayload: (messages: Array<{ role: string; content: string }>) => void;
 }
 

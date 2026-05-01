@@ -587,7 +587,10 @@ async def run_agent_loop(
     memory.add_user_message(message)
 
     # ── Build system prompt ────────────────────────────────────────────
-    system_prompt = build_system_prompt(profile, context, ltm_hits or None)
+    system_prompt = build_system_prompt(
+        profile, context, ltm_hits or None,
+        user_context=memory.get_user_context(),
+    )
 
     # ── Resolve profile tools → OpenAI function schema ─────────────────
     profile_tools = profile.get_tools()
@@ -790,6 +793,7 @@ async def run_agent_loop_with_emitter(
     system_prompt = build_system_prompt(
         profile, context, ltm_hits or None,
         intent_context=memory.get_intent_context(),
+        user_context=memory.get_user_context(),
     )
 
     # ── Confidence-gated KB injection ──────────────────────────────────
@@ -1181,6 +1185,7 @@ async def run_reexplain_loop_with_emitter(
     system_prompt = build_reexplain_prompt(
         user_message=user_message,
         last_bot_response=last_bot_response,
+        user_context=memory.get_user_context(),
     )
 
     messages = [

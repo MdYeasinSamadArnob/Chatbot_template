@@ -48,11 +48,30 @@ const BOT_SOCKET_URL = resolveBotSocketUrl();
 type EmitEvents = {
   chat_message: { message: string; conversation_id: string; profile?: string };
   reset_conversation: { conversation_id: string };
+  load_previous_session: { prev_conv_id: string };
+};
+
+type UserParams = {
+  userId?: string;
+  username?: string;
+  screenContext?: string;
+  timestamp?: string;
+  signature?: string;
 };
 
 type ListenEvents = {
   connected: (data: { conversation_id: string }) => void;
   history: (data: { messages: Array<{ role: string; content: string }> }) => void;
+  user_context: (data: {
+    user_id: string | null;
+    username: string | null;
+    screen_context: string | null;
+    is_guest: boolean;
+    conv_id: string;
+    has_previous_session: boolean;
+    prev_conv_id: string | null;
+  }) => void;
+  history_payload: (data: { messages: Array<{ role: string; content: string }>; prev_conv_id: string }) => void;
   thinking_start: () => void;
   thinking_end: () => void;
   thinking_status: (data: { label?: string }) => void;
@@ -87,10 +106,16 @@ function getSocket(): Socket<ListenEvents, EmitEvents> {
 }
 
 export const socketClient = {
-  connect(conversationId: string): void {
+  connect(conversationId?: string, userParams?: UserParams): void {
     const socket = getSocket();
-    // Pass conversation_id as query param so backend can restore history
-    (socket.io as any).opts.query = { conversation_id: conversationId };
+    const query: Record<string, string> = {};
+    if (conversationId) query.conversation_id = conversationId;
+    if (userParams?.userId)       query.user_id       = userParams.userId;
+    if (userParams?.username)     query.username      = userParams.username;
+    if (userParams?.screenContext) query.screen_context = userParams.screenContext;
+    if (userParams?.timestamp)    query.timestamp     = userParams.timestamp;
+    if (userParams?.signature)    query.signature     = userParams.signature;
+    (socket.io as any).opts.query = query;
     if (!socket.connected) {
       socket.connect();
     }

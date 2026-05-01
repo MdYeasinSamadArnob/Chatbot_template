@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import { TriangleAlert } from "lucide-react";
 import { useChat } from "@/hooks/useChat";
@@ -15,10 +15,37 @@ import { useChatStore } from "@/store/chatStore";
  */
 export function ChatScreen() {
   const searchParams = useSearchParams();
-  const urlConversationId = searchParams.get("conversation_id") ?? undefined;
 
-  const { submitInput, cancelRequest, resetConversation, isProcessing, errorMessages } =
-    useChat(urlConversationId);
+  // Identity params from WebView URL
+  const userId        = searchParams.get("user_id") ?? undefined;
+  const username      = searchParams.get("username") ?? undefined;
+  const screenContext = searchParams.get("screen_context") ?? undefined;
+  const timestamp     = searchParams.get("timestamp") ?? undefined;
+  const signature     = searchParams.get("signature") ?? undefined;
+  const urlConvId     = searchParams.get("conversation_id") ?? undefined;
+
+  // Per-user localStorage key — read on client only (SSR safe)
+  const [storedConvId, setStoredConvId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (userId && typeof window !== "undefined") {
+      const stored = localStorage.getItem(`ba_conv_id:${userId}`) ?? undefined;
+      setStoredConvId(stored);
+    }
+  }, [userId]);
+
+  // Prefer URL conv_id (reload), then localStorage (soft-nav resume)
+  const conversationId = urlConvId ?? storedConvId;
+
+  const {
+    submitInput,
+    cancelRequest,
+    resetConversation,
+    isProcessing,
+    errorMessages,
+    userContext,
+    hasPreviousSession,
+    loadPreviousSession,
+  } = useChat(conversationId, { userId, username, screenContext, timestamp, signature });
 
   const messages = useChatStore((s) => s.messages);
   const [showClearDialog, setShowClearDialog] = useState(false);
@@ -33,6 +60,7 @@ export function ChatScreen() {
       <ChatHeader
         onReset={() => setShowClearDialog(true)}
         hasMessages={messages.length > 0}
+        username={userContext.username}
       />
 
       {/* Error banner */}
@@ -44,7 +72,13 @@ export function ChatScreen() {
         </div>
       )}
 
-      <ChatContainer onSuggestion={submitInput} />
+      <ChatContainer
+        onSuggestion={submitInput}
+        screenContext={userContext.screenContext}
+        hasPreviousSession={hasPreviousSession}
+        onLoadPrevious={loadPreviousSession}
+        username={userContext.username}
+      />
 
       <ChatEditor
         onSubmit={submitInput}

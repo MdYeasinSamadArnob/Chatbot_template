@@ -585,21 +585,139 @@ def _make_guardrail_emit(base_emit_fn, conversation_id: str):
 
 @sio.event
 async def connect(sid: str, environ: dict, auth: dict | None = None) -> None:
+    import hashlib as _hashlib
+    import time as _time
     import urllib.parse
     import uuid as uuid_module
 
+    t0 = _time.monotonic()
+
     query_string = environ.get("QUERY_STRING", "")
     params = dict(urllib.parse.parse_qsl(query_string))
-    conversation_id = params.get("conversation_id", "")
 
-    if not conversation_id:
-        conversation_id = str(uuid_module.uuid4())
+    # ── Parse and sanitize identity params ────────────────────────────
+    from app.session.auth import (
+        sanitize_user_id,
+        sanitize_username,
+        sanitize_screen_context,
+        verify_user_identity,
+    )
+    from app.session.redis_store import get_redis_store
+
+    raw_user_id      = params.get("user_id", "")
+    raw_username     = params.get("username", "")
+    raw_screen_ctx   = params.get("screen_context", "")
+    raw_timestamp    = params.get("timestamp", "")
+    raw_signature    = params.get("signature", "")
+    raw_conv_id      = params.get("conversation_id", "")
+
+    user_id       = sanitize_user_id(raw_user_id)
+    username      = sanitize_username(raw_username)
+    screen_context = sanitize_screen_context(raw_screen_ctx)
+
+    is_authenticated = bool(user_id)
+
+    # ── HMAC verification for authenticated users ──────────────────────
+    if is_authenticated:
+        if not verify_user_identity(
+            user_id, username, screen_context,
+            raw_timestamp, raw_signature,
+            settings.session_secret,
+        ):
+            logger.warning(
+                "[connect] HMAC verification failed for user_id=%r — disconnecting sid=%s",
+                user_id[:16], sid,
+            )
+            await sio.disconnect(sid)
+            return
+
+    # ── Conversation resolution ────────────────────────────────────────
+    redis = get_redis_store()
+    conv_source = "guest"
+    conversation_id: str = ""
+
+    if is_authenticated:
+        from app.db.connection import AsyncSessionLocal
+        from app.db.repositories import (
+            get_conversation_by_id_and_user,
+            get_latest_conversation_for_user,
+            create_user_conversation,
+            has_previous_conversations,
+        )
+
+        if raw_conv_id:
+            # Reload path: client supplied a conv_id from localStorage.
+            # Strictly verify ownership before trusting it.
+            async with AsyncSessionLocal() as db_session:
+                verified = await get_conversation_by_id_and_user(
+                    db_session, raw_conv_id, user_id
+                )
+            if verified:
+                conversation_id = verified
+                conv_source = "db"
+            else:
+                # conv_id doesn't belong to this user — treat as fresh launch
+                logger.warning(
+                    "[connect] conv_id %r not owned by user_id_hash=%s — creating new",
+                    raw_conv_id[:8], _hashlib.sha256(user_id.encode()).hexdigest()[:8],
+                )
+
+        if not conversation_id:
+            # Fresh launch: always create a new conversation
+            async with AsyncSessionLocal() as db_session:
+                conversation_id = await create_user_conversation(
+                    db_session, user_id, username, screen_context
+                )
+            conv_source = "new"
+            # Update Redis user→conv mapping
+            await redis.set_user_conv(user_id, conversation_id)
+            await redis.set_user_profile(user_id, username, screen_context)
+
+        # Check if the user has previous conversations (for "Continue" button)
+        has_prev = False
+        prev_conv_id: str | None = None
+        if conv_source == "new":
+            async with AsyncSessionLocal() as db_session:
+                prev_conv_id = await get_latest_conversation_for_user(db_session, user_id)
+            # prev_conv_id is the most recent, but if this IS a reload it equals current
+            if prev_conv_id and prev_conv_id != conversation_id:
+                has_prev = True
+            else:
+                prev_conv_id = None
+    else:
+        # Guest: use client-supplied UUID or generate one
+        conversation_id = raw_conv_id or str(uuid_module.uuid4())
+        has_prev = False
+        prev_conv_id = None
 
     _sid_to_conversation[sid] = conversation_id
-    logger.info("Client %s connected (conversation=%s)", sid, conversation_id)
 
+    latency_ms = int((_time.monotonic() - t0) * 1000)
+    user_hash = _hashlib.sha256(user_id.encode()).hexdigest()[:8] if user_id else "guest"
+    logger.info(
+        "[connect] user_hash=%s conv=%s source=%s resume=%s latency=%dms sid=%s",
+        user_hash, conversation_id, conv_source, raw_conv_id != "", latency_ms, sid,
+    )
+
+    # ── Load memory ────────────────────────────────────────────────────
     memory = get_or_create_memory(conversation_id, settings.memory_persist_dir)
-    await memory.load_from_db()
+
+    # Session load: try Redis first (hot path), fall back to DB + rehydrate
+    if redis.available:
+        cached_msgs = await redis.get_session(conversation_id)
+        if cached_msgs is not None:
+            # Redis hit — restore messages directly without DB round-trip
+            memory._messages = cached_msgs  # noqa: SLF001
+            logger.debug("[connect] session loaded from Redis for conv=%s", conversation_id)
+        else:
+            # Redis miss — load from DB then rehydrate Redis (SET NX)
+            await memory.load_from_db()
+            await redis.set_session(conversation_id, memory.get_messages(), nx=True)
+    else:
+        await memory.load_from_db()
+
+    # Set user context on the memory object so prompts.py can use it
+    memory.set_user_context(user_id or None, username or None, screen_context or None)
 
     # Expire stale flows on reconnect
     state = memory.get_state()
@@ -618,6 +736,21 @@ async def connect(sid: str, environ: dict, auth: dict | None = None) -> None:
                 pass
 
     await sio.emit("connected", {"conversation_id": conversation_id}, to=sid)
+
+    # Emit user_context so the frontend can personalise header / quick actions
+    await sio.emit(
+        "user_context",
+        {
+            "user_id": user_id or None,
+            "username": username or None,
+            "screen_context": screen_context or None,
+            "is_guest": not is_authenticated,
+            "conv_id": conversation_id,
+            "has_previous_session": has_prev,
+            "prev_conv_id": prev_conv_id,
+        },
+        to=sid,
+    )
 
     history = [
         {"role": m["role"], "content": m.get("content", "")}
@@ -640,11 +773,74 @@ async def disconnect(sid: str) -> None:
     _conversation_locks.pop(conversation_id, None)
 
 
+@sio.event
+async def load_previous_session(sid: str, data: dict[str, Any]) -> None:
+    """
+    Load the last 50 messages from a previous conversation and emit them as a
+    single 'history_payload' event.  The frontend replaces (not appends) its
+    message list with this payload.
+
+    Requires: { prev_conv_id: str }
+    The ownership check relies on the user_id stored in memory for this sid.
+    """
+    conversation_id = _sid_to_conversation.get(sid, "")
+    if not conversation_id:
+        return
+
+    prev_conv_id = str(data.get("prev_conv_id", "")).strip()
+    if not prev_conv_id:
+        await sio.emit("error", {"message": "prev_conv_id is required."}, to=sid)
+        return
+
+    memory = get_or_create_memory(conversation_id, settings.memory_persist_dir)
+    user_ctx = memory.get_user_context()
+    user_id = user_ctx.get("user_id")
+
+    if not user_id:
+        await sio.emit("error", {"message": "Not authenticated."}, to=sid)
+        return
+
+    try:
+        from app.db.connection import AsyncSessionLocal
+        from app.db.repositories import (
+            get_conversation_by_id_and_user,
+            get_last_n_messages,
+        )
+        async with AsyncSessionLocal() as db_session:
+            # Strict ownership check
+            verified = await get_conversation_by_id_and_user(db_session, prev_conv_id, user_id)
+            if not verified:
+                await sio.emit("error", {"message": "Previous session not found."}, to=sid)
+                return
+            msgs = await get_last_n_messages(db_session, prev_conv_id, n=50)
+
+        await sio.emit("history_payload", {"messages": msgs, "prev_conv_id": prev_conv_id}, to=sid)
+        logger.info(
+            "[load_previous_session] conv=%s loaded %d msgs from prev_conv=%s",
+            conversation_id, len(msgs), prev_conv_id,
+        )
+    except Exception as exc:
+        logger.warning("[load_previous_session] failed: %s", exc)
+        await sio.emit("error", {"message": "Could not load previous session."}, to=sid)
+
+
 async def _persist(memory) -> None:
+    """Flush memory to PostgreSQL (source of truth) then update Redis cache."""
     try:
         await memory.save_to_db()
     except Exception as exc:
         logger.warning("Background persist failed: %s", exc)
+        return  # Don't attempt Redis if DB failed
+
+    # Write-through to Redis (best-effort, never raises)
+    try:
+        from app.session.redis_store import get_redis_store
+        redis = get_redis_store()
+        if redis.available:
+            msgs = memory.get_messages()
+            await redis.set_session(memory.conversation_id, msgs, nx=False)
+    except Exception as exc:
+        logger.warning("Redis write-through after persist failed: %s", exc)
 
 
 # ── Chat message handler ───────────────────────────────────────────────────
@@ -655,7 +851,10 @@ async def chat_message(sid: str, data: dict[str, Any]) -> None:
     Main entry point. Runs the full routing decision tree before
     delegating to the appropriate handler.
     """
-    conversation_id = data.get("conversation_id") or _sid_to_conversation.get(sid, "")
+    # Always use the server-authoritative conversation_id for this sid.
+    # The client-supplied conversation_id is intentionally ignored here to
+    # prevent a stale localStorage value from routing to the wrong memory.
+    conversation_id = _sid_to_conversation.get(sid, "")
     raw_message = str(data.get("message", "")).strip()
     profile_name = data.get("profile", "banking")
 
@@ -675,7 +874,6 @@ async def chat_message(sid: str, data: dict[str, Any]) -> None:
         await sio.emit("error", {"message": "Please wait for the previous response to complete."}, to=sid)
         return
 
-    _sid_to_conversation[sid] = conversation_id
     memory = get_or_create_memory(conversation_id, settings.memory_persist_dir)
 
     async def emit_fn(event: str, payload: Any) -> None:
@@ -1043,12 +1241,15 @@ async def _route_message(
         and _is_truly_ambiguous
         and not classification.is_clarification
     ):
+        _uctx = memory.get_user_context()
+        _fname = (_uctx.get("username") or "").split()[0] if _uctx.get("username") else ""
         if classification.language == "bn":
             disambig = "ক্ষমাকরুন, আমি নিশ্চিত হতে চাইছি — আপনি কি সারা হয়েছেন, নাকি আরও কোনো সাহায্যের প্রয়োজন আছে?"
         elif classification.language == "banglish":
             disambig = "Just to confirm — apni ki sesh korechhen, naaki aro kono help dorkar?"
         else:
-            disambig = "Just to confirm — are you all done, or is there something else I can help you with?"
+            _name_part = f", {_fname}" if _fname else ""
+            disambig = f"Just to confirm{_name_part} — are you all done, or is there something else I can help you with?"
 
         yes_no_chips = [
             {"label": "Yes, I'm done", "value": "No, that's all I need"},
@@ -1158,7 +1359,9 @@ async def _route_message(
         elif classification.language == "hinglish":
             reply = "Hi! Main aapki banking mein madad karne ke liye yahan hoon. Kya jaanna chahte hain?"
         else:
-            reply = "Hi! I am doing well. How can I help you with banking today?"
+            _uctx_g = memory.get_user_context()
+            _gname = (_uctx_g.get("username") or "").split()[0] if _uctx_g.get("username") else ""
+            reply = (f"Hi, {_gname}! How can I help you with your banking today?" if _gname else "Hi! How can I help you with your banking today?")
 
         greeting_chips = (classification.suggested_actions or [])[:4]
 

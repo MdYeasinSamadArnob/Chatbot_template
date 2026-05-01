@@ -38,6 +38,10 @@ async def init_db() -> None:
         "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS embedding_status TEXT NOT NULL DEFAULT 'pending'",
         "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ",
         "ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS section_anchor TEXT",
+        # ── User identity columns on conversations ────────────────────────
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id VARCHAR(128)",
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS username VARCHAR(256)",
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS screen_context VARCHAR(128)",
     ]
     for sql in migrations:
         try:
@@ -77,6 +81,12 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_hnsw_idx "
             "ON knowledge_chunks USING hnsw (chunk_embedding vector_cosine_ops) "
             "WITH (m = 16, ef_construction = 64)",
+        ),
+        (
+            "idx_conv_user_created",
+            "CREATE INDEX IF NOT EXISTS idx_conv_user_created "
+            "ON conversations (user_id, created_at DESC) "
+            "WHERE user_id IS NOT NULL",
         ),
     ]
     for name, sql in indexes:

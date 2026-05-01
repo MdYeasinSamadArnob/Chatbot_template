@@ -32,7 +32,13 @@ function normalizeSources(input: unknown): RetrievedSource[] {
     }));
 }
 
-export function useChat(conversationId?: string) {
+export function useChat(conversationId?: string, userParams?: {
+  userId?: string;
+  username?: string;
+  screenContext?: string;
+  timestamp?: string;
+  signature?: string;
+}) {
   const store = useChatStore();
   const isProcessingRef = useRef(false);
 
@@ -70,6 +76,22 @@ export function useChat(conversationId?: string) {
 
     socketClient.on("history", ({ messages }) => {
       store.loadHistory(messages);
+    });
+
+    socketClient.on("user_context", (data) => {
+      store.setUserContext({
+        userId: data.user_id ?? undefined,
+        username: data.username ?? undefined,
+        screenContext: data.screen_context ?? undefined,
+        isGuest: data.is_guest,
+        convId: data.conv_id,
+        hasPreviousSession: data.has_previous_session,
+        prevConvId: data.prev_conv_id ?? undefined,
+      });
+    });
+
+    socketClient.on("history_payload", ({ messages }) => {
+      store.loadHistoryPayload(messages);
     });
 
     socketClient.on("thinking_start", () => {
@@ -149,7 +171,7 @@ export function useChat(conversationId?: string) {
     });
 
     // ── Connect ──────────────────────────────────────────────────────
-    socketClient.connect(effectiveConversationId);
+    socketClient.connect(effectiveConversationId, userParams);
 
     return () => {
       // Clean up listeners on unmount
@@ -158,6 +180,8 @@ export function useChat(conversationId?: string) {
       socketClient.offConnectError(onConnectError);
       socketClient.off("connected");
       socketClient.off("history");
+      socketClient.off("user_context");
+      socketClient.off("history_payload");
       socketClient.off("thinking_start");
       socketClient.off("thinking_end");
       socketClient.off("thinking_status");
@@ -209,15 +233,25 @@ export function useChat(conversationId?: string) {
     store.resetConversation();
   }, [effectiveConversationId, store]);
 
+  const loadPreviousSession = useCallback(() => {
+    const prevConvId = store.userContext.prevConvId;
+    if (!prevConvId) return;
+    socketClient.emit("load_previous_session", { prev_conv_id: prevConvId });
+  }, [store.userContext.prevConvId]);
+
   return {
     messages: store.messages,
     errorMessages: store.errorMessages,
     isProcessing: store.isProcessing,
     connectionStatus: store.connectionStatus,
     conversationId: effectiveConversationId,
+    userContext: store.userContext,
+    hasPreviousSession: store.userContext.hasPreviousSession ?? false,
+    prevConvId: store.userContext.prevConvId,
     submitInput,
     cancelRequest,
     resetConversation,
+    loadPreviousSession,
   };
 }
 

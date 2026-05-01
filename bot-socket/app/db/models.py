@@ -18,6 +18,10 @@ class Conversation(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     extra_metadata = Column(JSON, nullable=True)
+    # ── User identity (populated when an authenticated user connects) ──
+    user_id = Column(String(128), nullable=True, index=True)
+    username = Column(String(256), nullable=True)
+    screen_context = Column(String(128), nullable=True)
     messages = relationship("Message", back_populates="conversation")
 
 class Message(Base):

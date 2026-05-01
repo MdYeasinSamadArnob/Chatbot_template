@@ -12,6 +12,101 @@ async def ensure_conversation(session: AsyncSession, conversation_id: str) -> No
     stmt = pg_insert(Conversation).values(id=conversation_id).on_conflict_do_nothing()
     await session.execute(stmt)
 
+
+# ── User-identity conversation helpers ────────────────────────────────────
+
+async def get_latest_conversation_for_user(
+    session: AsyncSession, user_id: str
+) -> Optional[str]:
+    """
+    Return the most-recently-created conversation ID for this user, or None.
+    Uses created_at (immutable) instead of updated_at to avoid drift from
+    bot-message timestamps.
+    """
+    result = await session.execute(
+        select(Conversation.id)
+        .where(Conversation.user_id == user_id)
+        .order_by(Conversation.created_at.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def get_conversation_by_id_and_user(
+    session: AsyncSession, conv_id: str, user_id: str
+) -> Optional[str]:
+    """
+    Verify that conv_id belongs to user_id and return it, or None.
+    Never trusts client-supplied conv_id without this ownership check.
+    """
+    result = await session.execute(
+        select(Conversation.id).where(
+            Conversation.id == conv_id,
+            Conversation.user_id == user_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def create_user_conversation(
+    session: AsyncSession,
+    user_id: str,
+    username: str,
+    screen_context: str,
+) -> str:
+    """
+    Insert a new conversation row for an authenticated user and return its ID.
+    """
+    conv = Conversation(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        username=username or None,
+        screen_context=screen_context or None,
+    )
+    session.add(conv)
+    await session.commit()
+    return str(conv.id)
+
+
+async def has_previous_conversations(
+    session: AsyncSession, user_id: str, exclude_conv_id: str
+) -> bool:
+    """
+    Return True if the user has at least one conversation other than the
+    current one (used to decide whether to show "Continue from last chat").
+    """
+    result = await session.execute(
+        select(sqlfunc.count(Conversation.id)).where(
+            Conversation.user_id == user_id,
+            Conversation.id != exclude_conv_id,
+        )
+    )
+    count = result.scalar_one()
+    return (count or 0) > 0
+
+
+async def get_last_n_messages(
+    session: AsyncSession, conv_id: str, n: int = 50
+) -> List[Dict[str, Any]]:
+    """
+    Return the last N messages for a conversation ordered by created_at ASC.
+    Used by the "Continue from last chat" feature.
+    """
+    result = await session.execute(
+        select(Message)
+        .where(Message.conversation_id == conv_id)
+        .order_by(Message.created_at.desc())
+        .limit(n)
+    )
+    msgs = list(reversed(result.scalars().all()))
+    return [
+        {"role": m.role, "content": m.content or ""}
+        for m in msgs
+        if m.role in ("user", "assistant")
+    ]
+
 async def save_messages(session: AsyncSession, conversation_id: str, messages: List[Dict[str, Any]]) -> None:
     await ensure_conversation(session, conversation_id)
     await session.execute(delete(Message).where(Message.conversation_id == conversation_id))

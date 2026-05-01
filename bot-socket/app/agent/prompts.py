@@ -82,6 +82,11 @@ Do NOT answer from training knowledge. Do NOT combine retrieved articles with yo
 - Do NOT give personal financial advice (investment recommendations, tax advice).
 - If you cannot reliably answer from retrieved knowledge, say: "I don't have specific information about that in our knowledge base. Please contact {bank_name} support at our helpline for accurate guidance."
 
+## Currency
+- Always use **BDT** (Bangladeshi Taka, symbol ৳) for all monetary amounts and examples.
+- NEVER use $, USD, EUR, or any other foreign currency symbol.
+- Examples: "৳10,000", "BDT 50,000", "one lakh taka (৳1,00,000)".
+
 ## Response Style
 - Do NOT start responses with "Certainly!", "Of course!", "Sure thing!", "Great question!", "Absolutely!", or any filler phrase.
 - Do NOT start with a preamble that restates the question.
@@ -143,6 +148,7 @@ def build_system_prompt(
     context: dict,
     long_term_memories: list[str] | None = None,
     intent_context: str = "",
+    user_context: dict | None = None,
 ) -> str:
     """
     Build the full system prompt for an agent iteration.
@@ -151,6 +157,7 @@ def build_system_prompt(
         profile: The active agent profile (sets instructions + tool subset).
         context: Request context dict (capabilities, user info, session extras).
         long_term_memories: Optional relevant memories from LTM search.
+        user_context: Optional dict with keys user_id, username, screen_context.
     """
     from app.config import settings
 
@@ -196,6 +203,22 @@ def build_system_prompt(
         if intent_context and intent_context.strip():
             recent_context_section = f"## Recent Context (this session)\n{intent_context}\n"
 
+        # ── User identity section (only shown when username is known) ──────
+        user_context_section = ""
+        if user_context:
+            raw_username = user_context.get("username") or ""
+            raw_screen = user_context.get("screen_context") or ""
+            if raw_username:
+                # Use first name only — never the raw string in case it contains
+                # unusual chars that survived sanitization on a different path
+                first_name = raw_username.split()[0] if raw_username.split() else raw_username
+                screen_hint = raw_screen if raw_screen else "general banking"
+                user_context_section = (
+                    f"## User Context\n"
+                    f"- User name: {first_name} — address them by first name where natural.\n"
+                    f"- Current screen / intent hint: {screen_hint}\n"
+                )
+
         return BANKING_SYSTEM_PROMPT_TEMPLATE.format(
             bank_name=settings.bank_name,
             current_time=current_time,
@@ -203,7 +226,7 @@ def build_system_prompt(
             long_term_section=long_term_section,
             recent_context_section=recent_context_section,
             context_section=context_section,
-        ).strip()
+        ).strip() + ("\n\n" + user_context_section.strip() if user_context_section else "")
 
     # Capabilities section (user-supplied capabilities list)
     caps = context.get("capabilities", [])
@@ -224,12 +247,21 @@ def build_system_prompt(
 def build_reexplain_prompt(
     user_message: str,
     last_bot_response: str,
+    user_context: dict | None = None,
 ) -> str:
     """Build the one-shot re-explanation system prompt."""
     from app.config import settings
 
-    return RE_EXPLAIN_PROMPT_TEMPLATE.format(
+    prompt = RE_EXPLAIN_PROMPT_TEMPLATE.format(
         bank_name=settings.bank_name,
         last_bot_response=last_bot_response[:800],  # cap to avoid token overflow
         user_message=user_message,
     ).strip()
+
+    if user_context:
+        raw_username = (user_context.get("username") or "").strip()
+        if raw_username:
+            first_name = raw_username.split()[0]
+            prompt += f"\n\nThe user's name is {first_name}. You may address them by name. If they ask about their name, tell them."
+
+    return prompt
