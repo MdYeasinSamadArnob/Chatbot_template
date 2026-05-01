@@ -1346,12 +1346,7 @@ async def _route_message(
     # Avoids unnecessary LLM tool loop for pure greetings and language-style
     # small-talk such as "hi", "how are you", "speak in bangla".
     is_small_talk = bool(_SMALL_TALK_ROUTE_RE.search(raw_message))
-    _is_greeting_fastpath = (
-        classification.conversation_act == "acknowledgement_only"
-        or is_small_talk
-        or classification.assistant_action == "ask_clarification"  # greeting with no specific topic yet
-    )
-    if not active_flow_name and classification.intent == "greeting" and _is_greeting_fastpath:
+    if not active_flow_name and classification.intent == "greeting":
         if classification.language == "bn" or re.search(r"বাংলা|bangla|bengali", raw_message, re.IGNORECASE):
             reply = "জি, অবশ্যই। আমি বাংলায় কথা বলতে পারি। আপনি কী বিষয়ে সাহায্য চান?"
         elif classification.language == "banglish":
@@ -1445,7 +1440,12 @@ async def _route_message(
             await emit_fn("thinking_end", {})
             await emit_fn("text_delta", {"delta": _cached["answer"]})
             if _cached["sources"]:
-                await emit_fn("sources", {"sources": _cached["sources"]})
+                _cached_visible = [
+                    s for s in _cached["sources"]
+                    if s.get("document_type") == "procedure" and s.get("is_active", False)
+                ]
+                if _cached_visible:
+                    await emit_fn("sources", {"sources": _cached_visible})
             await emit_fn("finish", {
                 "finishReason": "stop",
                 "usage": {"promptTokens": 0, "completionTokens": 0},

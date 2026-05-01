@@ -185,6 +185,19 @@ def _extract_kb_tool_payload(result: str) -> tuple[str, list[dict[str, Any]]] | 
     return context_markdown, normalized_sources
 
 
+def _visible_sources(sources: list[dict]) -> list[dict]:
+    """Return only sources that should be displayed as source cards in the UI.
+
+    Business rule: show a chunk only when its document_type is "procedure"
+    *and* is_active is True.  All other chunks still reach the LLM via
+    context_markdown — they are just not surfaced to the user.
+    """
+    return [
+        s for s in sources
+        if s.get("document_type") == "procedure" and s.get("is_active", False)
+    ]
+
+
 def _is_ollama() -> bool:
     """True when the configured API base is an Ollama instance."""
     url = settings.ollama_base_url.lower()
@@ -880,8 +893,13 @@ async def run_agent_loop_with_emitter(
         # Emit pre-fetched sources immediately so the UI can display them
         # alongside the streamed answer (no tool call needed in this path).
         if kb_sources:
-            logger.info("[%s] Emitting %d pre-fetched KB sources (strong_kb path)", conversation_id, len(kb_sources))
-            await emit_fn("sources", {"sources": kb_sources})
+            _emit_sources = _visible_sources(kb_sources)
+            logger.info(
+                "[%s] Emitting KB sources (strong_kb path): total=%d visible=%d",
+                conversation_id, len(kb_sources), len(_emit_sources),
+            )
+            if _emit_sources:
+                await emit_fn("sources", {"sources": _emit_sources})
 
     profile_tools = profile.get_tools()
     if context.get("_disable_kb_tool"):
@@ -1078,8 +1096,9 @@ async def run_agent_loop_with_emitter(
             llm_result = result
             if kb_payload:
                 llm_result, sources = kb_payload
-                if sources:
-                    await emit_fn("sources", {"sources": sources})
+                _emit_sources = _visible_sources(sources)
+                if _emit_sources:
+                    await emit_fn("sources", {"sources": _emit_sources})
 
             memory.add_tool_result(tool_call_id, llm_result)
             await emit_fn("tool_result", {"toolCallId": tool_call_id, "result": result})

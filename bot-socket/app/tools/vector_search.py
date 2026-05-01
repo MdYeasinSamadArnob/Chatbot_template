@@ -657,6 +657,8 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
             "image_urls": row.image_urls or [],
             "render_blocks": render_blocks,
             "reranker_score": 0.0,  # populated below by cross-encoder
+            "document_type": row.document_type or "",
+            "is_active": bool(row.is_active),
         })
 
     # Cross-encoder rerank: precise query-document relevance scoring on CPU.
