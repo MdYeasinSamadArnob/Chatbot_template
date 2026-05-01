@@ -148,6 +148,13 @@ _AFFIRMATIVE_SHORT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Farewell tokens — used for cheap fast-path (no LLM call)
+_FAREWELL_TOKENS: frozenset[str] = frozenset({
+    "thanks", "thank", "you", "bye", "goodbye", "done", "ok", "okay",
+    "alright", "all", "that's", "thats", "see", "later", "good", "day",
+    "night", "take", "care", "nothing", "else", "no", "more",
+})
+
 
 def _default_handoff_text(
     assistant_action: str,
@@ -503,6 +510,32 @@ async def classify_intent(
             next_likely=[],
         )
 
+    # ── Farewell fast-path (no LLM call) ──────────────────────────────────
+    # If ≤5 tokens and ALL tokens are farewell words → close_conversation
+    _tokens = [t.lower().strip(".,!'") for t in msg.split()]
+    if _tokens and len(_tokens) <= 5 and all(t in _FAREWELL_TOKENS for t in _tokens):
+        logger.info("[classifier] farewell_fastpath msg=%r", msg[:60])
+        return ClassificationResult(
+            intent="general_faq",
+            confidence=0.95,
+            conversation_act="conversation_complete",
+            assistant_action="close_conversation",
+            language="en",
+            sentiment="positive",
+            reply_style="rag_answer",
+            should_end_conversation=True,
+            should_abort_flow=False,
+            is_clarification=False,
+            is_abort=False,
+            is_negative_sentiment=False,
+            suggested_profile="default",
+            flow_name=None,
+            required_slots=[],
+            handoff_text="",
+            suggested_actions=[],
+            next_likely=[],
+        )
+
     intent_list_lines = "\n".join(
         f"{name}: {defn.description}"
         for name, defn in INTENTS.items()
@@ -551,7 +584,8 @@ async def classify_intent(
         "CONFIDENCE: <0.0-1.0>\n"
         "ACT: <conversation act>\n"
         "ACTION: <assistant action>\n"
-        "LANGUAGE: <en|bn|hinglish|other>\n"
+        "LANGUAGE: <en|bn|banglish|hinglish|other>\n"
+        "  bn=Bengali Unicode script, banglish=Bengali in Roman letters (e.g. 'ami transfer korte chai'), hinglish=Hindi-English mix\n"
         "SENTIMENT: <positive|neutral|negative>\n"
         "NEXT_LIKELY: <intent_a>|<intent_b>\n\n"
         "Leave NEXT_LIKELY empty if none.\n"
@@ -627,6 +661,9 @@ async def classify_intent(
             raw_action = str(data.get("assistant_action", "answer_with_rag"))
             assistant_action = raw_action if raw_action in _VALID_ASSISTANT_ACTIONS else "answer_with_rag"
             language = str(data.get("language", "en"))
+            # Normalise: keep known codes; unknown falls to 'other'
+            if language not in ("en", "bn", "banglish", "hinglish", "other"):
+                language = "other"
             sentiment = str(data.get("sentiment", "neutral"))
             raw_handoff_text = data.get("handoff_text", "")
             handoff_text = raw_handoff_text.strip() if isinstance(raw_handoff_text, str) else ""

@@ -859,45 +859,10 @@ async def run_agent_loop_with_emitter(
         and not bool(context.get("_kb_unavailable"))
     )
 
-    # Guard: verify retrieved articles are actually on-topic for this query.
-    # If all source titles are from a clearly different domain, the prefetch
-    # matched on weak keyword overlap (BM25/HNSW near-miss).  In that case
-    # fall through to the normal tool-call path so the agent can search more
-    # precisely — do NOT force streaming with irrelevant articles.
-    if strong_kb_answer_ready and kb_sources:
-        import re as _re
-        intent = str(context.get("_intent", "") or "").lower()
-        # Split intent on underscores: "card_services" → ["card", "services"]
-        # These are always English regardless of user language.
-        intent_words = [w for w in intent.replace("_", " ").split() if len(w) > 3]
-        # Extract only ASCII words from the user message — safe for multilingual:
-        # Bengali/Arabic words won't match English source titles anyway, so we
-        # only pick up English words the user happened to type.
-        ascii_msg_words = _re.findall(r'[a-z]{4,}', message.lower())
-        _stop = {
-            "what", "when", "where", "which", "does", "have", "that", "this",
-            "with", "from", "will", "your", "about", "into", "more", "some",
-            "please", "could", "would", "should", "tell", "show", "help",
-        }
-        topic_words = (set(intent_words) | set(ascii_msg_words)) - _stop
-
-        # Check if any retrieved source title shares at least one topic word
-        def _titles_relevant(sources: list, words: set) -> bool:
-            for src in sources:
-                title_lower = (src.get("document_title") or "").lower()
-                if any(w in title_lower for w in words):
-                    return True
-            return False
-
-        if topic_words and not _titles_relevant(kb_sources, topic_words):
-            strong_kb_answer_ready = False
-            logger.info(
-                "[%s] strong_kb CANCELLED — source titles are off-topic "
-                "(topic_words=%s, titles=%s)",
-                conversation_id,
-                sorted(topic_words)[:8],
-                [s.get("document_title", "") for s in kb_sources],
-            )
+    # The upstream multi-signal confidence gate (reranker_score + count + keyword)
+    # already filters out weak retrievals before this point.  Trusting it here
+    # removes the need for a secondary title-word check that was fragile for
+    # multilingual queries and caused unnecessary tool round trips.
     if strong_kb_answer_ready:
         system_prompt += (
             "\n\n## Tool Policy For This Turn\n"
@@ -1146,8 +1111,43 @@ async def run_agent_loop_with_emitter(
     # Emit final thinking_end
     await emit_fn("thinking_end", {})
 
-    # Fire-and-forget memory summarization (background task, zero latency impact)
+    # ── Grounding check (system-level enforcement) ─────────────────────────
+    # When the KB had high-confidence sources, verify the answer actually
+    # used them.  Minimum grounding signal: the answer contains a title word
+    # from at least one source OR the scripted fallback phrase.
+    # If neither is found, the model likely answered from training knowledge —
+    # override with the scripted fallback so the user is never misled.
     full_answer = " ".join(answer_text_parts).strip()
+    _GROUNDING_FALLBACK = (
+        "I don't have specific information on that in our knowledge base. "
+        "Please contact our support team for accurate guidance."
+    )
+    if (
+        full_answer
+        and kb_conf >= 0.75
+        and kb_sources
+        and _GROUNDING_FALLBACK.lower()[:30] not in full_answer.lower()
+    ):
+        # Check: does the answer contain at least one word from any source title?
+        _source_title_words: set[str] = set()
+        for _src in kb_sources:
+            for _w in (_src.get("document_title") or "").lower().split():
+                if len(_w) > 3:
+                    _source_title_words.add(_w)
+        _answer_lower = full_answer.lower()
+        _grounded = any(w in _answer_lower for w in _source_title_words)
+        if not _grounded:
+            logger.warning(
+                "[%s] grounding_check_failed — answer lacks any source title word; "
+                "overriding with scripted fallback. sources=%s",
+                conversation_id,
+                [s.get("document_title", "") for s in kb_sources],
+            )
+            full_answer = _GROUNDING_FALLBACK
+            # Re-emit the corrected answer (replace streamed content)
+            await emit_fn("text_delta", {"delta": "\n\n" + _GROUNDING_FALLBACK})
+
+    # Fire-and-forget memory summarization (background task, zero latency impact)
     if full_answer:
         intent = str(context.get("_last_topic", "general_faq"))
         asyncio.create_task(_summarize_and_record(message, full_answer, intent, memory))

@@ -656,7 +656,16 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
             "content_text": content,
             "image_urls": row.image_urls or [],
             "render_blocks": render_blocks,
+            "reranker_score": 0.0,  # populated below by cross-encoder
         })
+
+    # Cross-encoder rerank: precise query-document relevance scoring on CPU.
+    # Replaces positional ordering with semantic relevance scores.
+    try:
+        from app.tools.reranker import rerank as _ce_rerank
+        sources = await _ce_rerank(args.query, sources, top_k=len(sources))
+    except Exception as _re_exc:
+        logger.warning("[reranker] rerank call failed: %s — continuing without rerank", _re_exc)
 
     result_count = len(out)
     header = f"Found {result_count} relevant article{'s' if result_count != 1 else ''} from the knowledge base:\n\n"

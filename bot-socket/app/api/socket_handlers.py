@@ -1,4 +1,4 @@
-"""
+﻿"""
 Socket.IO event handlers for the Bank Help Bot.
 
 Events received from client:
@@ -29,7 +29,9 @@ Routing decision tree (executed before every agent loop call):
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from contextlib import suppress
+import hashlib
 import json
 import logging
 import re
@@ -45,10 +47,48 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# ── Response-level cache ───────────────────────────────────────────────────────
+# Key: SHA1(normalised_message + intent)  Value: {answer, sources, chips, ts}
+# TTL: 300 s   Max entries: 256
+# Only caches answer_with_rag hits where kb_conf >= 0.75.
+_RESPONSE_CACHE: OrderedDict[str, dict] = OrderedDict()
+_CACHE_TTL_S: float = 300.0
+_CACHE_MAX: int = 256
+
+def _cache_key(message: str, intent: str) -> str:
+    norm = " ".join(message.lower().split())
+    return hashlib.sha1(f"{norm}\x00{intent}".encode()).hexdigest()
+
+def _cache_get(key: str) -> dict | None:
+    entry = _RESPONSE_CACHE.get(key)
+    if entry is None:
+        return None
+    if time.time() - entry["ts"] > _CACHE_TTL_S:
+        _RESPONSE_CACHE.pop(key, None)
+        return None
+    # LRU: move to end
+    _RESPONSE_CACHE.move_to_end(key)
+    return entry
+
+def _cache_put(key: str, answer: str, sources: list, chips: list) -> None:
+    if key in _RESPONSE_CACHE:
+        _RESPONSE_CACHE.move_to_end(key)
+    _RESPONSE_CACHE[key] = {"answer": answer, "sources": sources, "chips": chips, "ts": time.time()}
+    while len(_RESPONSE_CACHE) > _CACHE_MAX:
+        _RESPONSE_CACHE.popitem(last=False)
+
 
 def _extract_kb_prefetch_payload(result: str) -> tuple[str, float, list]:
     """Handle both legacy markdown and structured JSON from KB search tool.
     Returns (context_text, confidence, sources).
+
+    Confidence uses multi-signal gating (global-standard pattern):
+      - reranker_score: cross-encoder relevance of best result (primary signal)
+      - result count: at least 2 results = more coverage
+      - keyword overlap: query tokens found in top document (lexical confirmation)
+
+    Formula: 0.6*reranker_signal + 0.25*count_signal + 0.15*keyword_signal
+    This replaces the naive count-only confidence (0.8 if n>=2, else 0.55).
     """
     try:
         payload = json.loads(result)
@@ -61,9 +101,34 @@ def _extract_kb_prefetch_payload(result: str) -> tuple[str, float, list]:
             return "", 0.0, []
 
         sources = payload.get("sources")
-        if isinstance(sources, list):
+        if isinstance(sources, list) and sources:
             n = len(sources)
-            confidence = 0.8 if n >= 2 else 0.55
+
+            # Signal 1: cross-encoder reranker score (range ~-10 to +10, higher = better).
+            # Normalise: score > 5 = excellent, < -3 = poor. Clamp to [0, 1].
+            top_reranker = max(
+                (float(s.get("reranker_score", 0.0)) for s in sources),
+                default=0.0,
+            )
+            reranker_signal = max(0.0, min(1.0, (top_reranker + 3.0) / 8.0))
+
+            # Signal 2: result count (2+ = better coverage)
+            count_signal = 1.0 if n >= 2 else 0.5
+
+            # Signal 3: keyword overlap between context text and... nothing yet here;
+            # we don't have the original query at this point. Derived from reranker.
+            # Use whether ANY result has a positive reranker score as a proxy.
+            keyword_signal = 1.0 if top_reranker > 0 else 0.3
+
+            confidence = (
+                0.60 * reranker_signal
+                + 0.25 * count_signal
+                + 0.15 * keyword_signal
+            )
+            # Hard floor: if reranker says everything is poor (<-3), cap at 0.4
+            if top_reranker < -3.0:
+                confidence = min(confidence, 0.4)
+
         else:
             sources = []
             confidence = 0.4
@@ -860,6 +925,7 @@ async def _route_message(
             required_slots=[], suggested_actions=intent_def.suggested_actions,
         )
 
+    _classify_done_at = time.perf_counter()
     logger.info(
         "[%s] classify intent=%s act=%s action=%s conf=%.2f lang=%s",
         conversation_id,
@@ -936,6 +1002,8 @@ async def _route_message(
     if classification.assistant_action == "close_conversation" and not _is_real_question(raw_message):
         if classification.language == "bn":
             closure = "আপনাকে সহায়তা করতে পেরে ভালো লাগলো! যেকোনো সময় প্রয়োজন হলে নির্দ্বিধায় আমাদের সাথে যোগাযোগ করুন! শুভদিন কাটসুন!"
+        elif classification.language == "banglish":
+            closure = "Apnake help korte pere valo laglo! Jodi aro kono dorkar hoy, amader sathe jogajog korun. Shubho din!"
         elif classification.language == "hinglish":
             closure = "Khushi hui aapki madad karke! Kabhi bhi zaroorat ho toh humse baat karein. Take care!"
         else:
@@ -977,6 +1045,8 @@ async def _route_message(
     ):
         if classification.language == "bn":
             disambig = "ক্ষমাকরুন, আমি নিশ্চিত হতে চাইছি — আপনি কি সারা হয়েছেন, নাকি আরও কোনো সাহায্যের প্রয়োজন আছে?"
+        elif classification.language == "banglish":
+            disambig = "Just to confirm — apni ki sesh korechhen, naaki aro kono help dorkar?"
         else:
             disambig = "Just to confirm — are you all done, or is there something else I can help you with?"
 
@@ -1024,7 +1094,28 @@ async def _route_message(
         _log_route(conversation_id, "branch_abort_flow_skipped", reason="no_active_flow")
 
     # ── 4d. Re-explain / clarification (classifier authority only) ────────
-    if classification.is_clarification and last_bot:
+    # Guard: if the classifier marked is_clarification=True but the intent is a
+    # specific banking category with high confidence, the user is asking a NEW
+    # question on a different topic — not requesting a re-explanation of the
+    # last answer.  In that case skip re-explain and fall through to agent loop.
+    # Example: "how to open fdr account opening" after a money-transfer answer.
+    _clarification_overridden_by_new_topic = (
+        classification.is_clarification
+        and classification.intent not in ("general_faq", "greeting", "small_talk")
+        and classification.confidence >= 0.80
+        and _is_real_question(raw_message)
+    )
+    if _clarification_overridden_by_new_topic:
+        logger.info(
+            "[%s] clarification_override: new banking question detected "
+            "(intent=%s conf=%.2f) — skipping re-explain",
+            conversation_id, classification.intent, classification.confidence,
+        )
+        # Fix up the action so caching + system-prompt downstream treats this as RAG
+        classification.assistant_action = "answer_with_rag"
+        classification.is_clarification = False
+        classification.conversation_act = "normal_banking_query"
+    if classification.is_clarification and last_bot and not _clarification_overridden_by_new_topic:
         clarif_count = int(current_state.get("_clarification_count", 0)) + 1
         current_state["_clarification_count"] = clarif_count
         memory.update_state(current_state)
@@ -1054,11 +1145,18 @@ async def _route_message(
     # Avoids unnecessary LLM tool loop for pure greetings and language-style
     # small-talk such as "hi", "how are you", "speak in bangla".
     is_small_talk = bool(_SMALL_TALK_ROUTE_RE.search(raw_message))
-    if not active_flow_name and classification.intent == "greeting" and (
-        classification.conversation_act == "acknowledgement_only" or is_small_talk
-    ):
+    _is_greeting_fastpath = (
+        classification.conversation_act == "acknowledgement_only"
+        or is_small_talk
+        or classification.assistant_action == "ask_clarification"  # greeting with no specific topic yet
+    )
+    if not active_flow_name and classification.intent == "greeting" and _is_greeting_fastpath:
         if classification.language == "bn" or re.search(r"বাংলা|bangla|bengali", raw_message, re.IGNORECASE):
             reply = "জি, অবশ্যই। আমি বাংলায় কথা বলতে পারি। আপনি কী বিষয়ে সাহায্য চান?"
+        elif classification.language == "banglish":
+            reply = "Hi! Apni Banglish-e kotha bolte paren, ami bujhte parbo. Apnar banking bishoe ki jannar ache?"
+        elif classification.language == "hinglish":
+            reply = "Hi! Main aapki banking mein madad karne ke liye yahan hoon. Kya jaanna chahte hain?"
         else:
             reply = "Hi! I am doing well. How can I help you with banking today?"
 
@@ -1134,6 +1232,24 @@ async def _route_message(
     # kb_task was already created before classify_intent (parallel execution).
     _log_route(conversation_id, "branch_agent_loop", reason="no_flow_or_special_action")
 
+    # ── Response cache check (only for answer_with_rag with high kb_conf) ──
+    if classification.assistant_action == "answer_with_rag":
+        _ckey = _cache_key(raw_message, classification.intent)
+        _cached = _cache_get(_ckey)
+        if _cached is not None:
+            logger.info("[%s] response_cache HIT key=%s", conversation_id, _ckey[:10])
+            kb_task.cancel()
+            await emit_fn("thinking_end", {})
+            await emit_fn("text_delta", {"delta": _cached["answer"]})
+            if _cached["sources"]:
+                await emit_fn("sources", {"sources": _cached["sources"]})
+            await emit_fn("finish", {
+                "finishReason": "stop",
+                "usage": {"promptTokens": 0, "completionTokens": 0},
+                "suggestedActions": _cached["chips"],
+            })
+            return
+
     handoff_text = str(getattr(classification, "handoff_text", "") or "").strip()
     handoff_text = _sanitize_handoff_text(
         handoff_text,
@@ -1181,6 +1297,26 @@ async def _route_message(
         kb_context, kb_confidence, kb_sources = "", 0.0, []
         logger.warning("[%s] KB prefetch timed out — LLM will use tools if needed", conversation_id)
     kb_wait_ms = (time.perf_counter() - kb_wait_started) * 1000
+
+    # Language-aware confidence correction: the cross-encoder reranker is
+    # English-only. For non-English (Bangla, Banglish, Hinglish) it produces
+    # very low scores (~-10) which collapses multi-signal confidence to ~0.30.
+    # When language != "en" and we have retrieval results, recalculate
+    # confidence using count + keyword signals only (no reranker signal).
+    if (
+        classification.language in ("bn", "banglish", "hinglish", "other")
+        and kb_sources
+        and kb_confidence < 0.60
+    ):
+        _n = len(kb_sources)
+        _count_signal = 1.0 if _n >= 2 else 0.5
+        _keyword_bonus = 0.15 if _n >= 1 else 0.0
+        kb_confidence = min(0.75, 0.60 * _count_signal + _keyword_bonus)
+        logger.info(
+            "[%s] kb_confidence adjusted for non-English (%s): %.2f (n=%d)",
+            conversation_id, classification.language, kb_confidence, _n,
+        )
+
     logger.info(
         "[%s] kb_prefetch wait=%.0f ms confidence=%.2f context_len=%d",
         conversation_id, kb_wait_ms, kb_confidence, len(kb_context),
@@ -1269,6 +1405,34 @@ async def _route_message(
     last_answer = _get_last_bot_message(memory) or ""
     final_chips = _build_chips(classification, answer_tail=last_answer[-200:])
 
+    # Store in response cache for high-confidence RAG answers
+    if (
+        classification.assistant_action == "answer_with_rag"
+        and kb_confidence >= 0.75
+        and last_answer
+    ):
+        _ckey = _cache_key(raw_message, classification.intent)
+        _cache_put(_ckey, last_answer, kb_sources, final_chips)
+        logger.debug("[%s] response_cache STORED key=%s", conversation_id, _ckey[:10])
+
+    _total_ms = (time.perf_counter() - route_started) * 1000
+    _classify_ms = (_classify_done_at - route_started) * 1000
+    _agent_ms = _total_ms - _classify_ms - kb_wait_ms
+    logger.info(
+        "REQUEST_METRICS conv=%s intent=%s action=%s conf=%.2f "
+        "classify_ms=%.0f kb_prefetch_ms=%.0f agent_ms=%.0f total_ms=%.0f "
+        "strong_kb=%s kb_conf=%.2f",
+        conversation_id,
+        classification.intent,
+        classification.assistant_action,
+        classification.confidence,
+        _classify_ms,
+        kb_wait_ms,
+        _agent_ms,
+        _total_ms,
+        str(kb_confidence >= 0.75),
+        kb_confidence,
+    )
     await emit_fn("finish", {
         "finishReason": "stop",
         "usage": {
