@@ -16,6 +16,7 @@ Startup order:
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,12 +38,37 @@ logger = logging.getLogger(__name__)
 
 # ── FastAPI app ────────────────────────────────────────────────────────────
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        from app.db.connection import init_db
+        await init_db()
+    except Exception as exc:
+        logger.warning("DB init failed (postgres may not be ready yet): %s", exc)
+
+    try:
+        from app.tools.vector_search import warmup_embedding
+        await warmup_embedding()
+    except Exception as exc:
+        logger.warning("Embedding warmup error: %s", exc)
+
+    from app.tools.registry import registry
+    logger.info(
+        "Bot Socket API starting. Model=%s  Tools=%s",
+        settings.model_name,
+        registry.tool_names(),
+    )
+    yield
+    logger.info("Bot Socket API shutting down.")
+
+
 _fastapi_app = FastAPI(
     title="Bot Socket API",
     description="Chat + Socket.IO API for bot-ui (DMZ).",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 _fastapi_app.add_middleware(
@@ -55,27 +81,6 @@ _fastapi_app.add_middleware(
 )
 
 _fastapi_app.include_router(chat_router)
-
-
-@_fastapi_app.on_event("startup")
-async def on_startup() -> None:
-    try:
-        from app.db.connection import init_db
-        await init_db()
-    except Exception as exc:
-        logger.warning("DB init failed (postgres may not be ready yet): %s", exc)
-
-    from app.tools.registry import registry
-    logger.info(
-        "Bot Socket API starting. Model=%s  Tools=%s",
-        settings.model_name,
-        registry.tool_names(),
-    )
-
-
-@_fastapi_app.on_event("shutdown")
-async def on_shutdown() -> None:
-    logger.info("Bot Socket API shutting down.")
 
 
 # ── Wrap with Socket.IO ASGI ───────────────────────────────────────────────

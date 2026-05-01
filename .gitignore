@@ -28,6 +28,14 @@ admin-api/.venv/
 venv/
 env/
 
+backend/.venv/
+
+**/node_modules/
+
+frontend/
+
+backend/
+
 # ── Memory / SQLite stores ────────────────────────────────────────────────────
 bot-socket/memory_store/
 admin-api/memory_store/
@@ -47,6 +55,11 @@ admin-ui/node_modules/
 admin-ui/.next/
 admin-ui/out/
 admin-ui/.turbo/
+
+
+# Node dependencies
+node_modules/
+frontend/node_modules/
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 docker-compose.override.yml

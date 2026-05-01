@@ -65,6 +65,7 @@ export interface SourceBlocksMessage extends BaseMessage {
 
 export interface ThinkingMessage extends BaseMessage {
   type: "thinking";
+  label?: string;
 }
 
 export type ChatMessage =
@@ -127,6 +128,7 @@ export interface ChatStore {
   addErrorMessage: (error: string) => void;
   addThinking: () => void;
   removeThinking: () => void;
+  updateThinkingLabel: (label: string) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   loadHistory: (messages: Array<{ role: string; content: string }>) => void;
   resetConversation: () => void;

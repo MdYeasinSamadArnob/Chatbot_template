@@ -80,6 +80,11 @@ export function useChat(conversationId?: string) {
       store.removeThinking();
     });
 
+    socketClient.on("thinking_status", (payload: { label?: string }) => {
+      const label = payload?.label ?? "";
+      if (label) store.updateThinkingLabel(label);
+    });
+
     socketClient.on("text_delta", (payload) => {
       const delta = payload?.delta ?? payload?.text ?? "";
       if (!delta) return;
@@ -155,6 +160,7 @@ export function useChat(conversationId?: string) {
       socketClient.off("history");
       socketClient.off("thinking_start");
       socketClient.off("thinking_end");
+      socketClient.off("thinking_status");
       socketClient.off("text_delta");
       socketClient.off("tool_call");
       socketClient.off("tool_result");

@@ -26,12 +26,17 @@ _EMBED_TIMEOUT = httpx.Timeout(
     write=_EMBED_TIMEOUT_SECONDS,
     pool=min(1.0, _EMBED_TIMEOUT_SECONDS),
 )
+# Slow timeout for retry attempts: covers Ollama model-swap time.
+# When qwen/granite finishes and Ollama swaps to the embedding model it takes
+# 3-15 s.  25 s gives comfortable headroom without blocking the request.
+_EMBED_TIMEOUT_SLOW = httpx.Timeout(connect=3.0, read=25.0, write=25.0, pool=3.0)
 _ENDPOINT_COOLDOWN_SECONDS = 45.0
 _ENDPOINT_FAILURE_UNTIL: dict[str, float] = {}
 _EMBED_SEMAPHORE = asyncio.Semaphore(1)
 _BREAKER_OPEN_UNTIL = 0.0
 _BREAKER_FAILURE_STREAK = 0
 _EMBED_CACHE: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+_NON_RETRYABLE_STATUS_CODES = {400, 404, 405, 422, 501}
 
 
 def embedding_backend_degraded() -> bool:
@@ -314,6 +319,12 @@ def _mark_endpoint_healthy(endpoint: str) -> None:
     _ENDPOINT_FAILURE_UNTIL.pop(endpoint, None)
 
 
+def _is_non_retryable_embedding_error(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _NON_RETRYABLE_STATUS_CODES
+    return False
+
+
 class VectorSearchInput(BaseModel):
     query: str = Field(..., description="User's banking question")
     top_k: int = Field(5, description="Number of results to return", ge=1, le=20)
@@ -356,15 +367,28 @@ async def embed_query(query_text: str) -> list[float]:
     last_exc: Exception | None = None
 
     async with _EMBED_SEMAPHORE:
-        async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT) as client:
-            for attempt in range(1, _EMBED_ATTEMPTS + 1):
-                # Prefer the endpoint that has proven stable in this environment.
-                endpoint_payloads = [
-                    ("/api/embeddings", {"model": settings.embedding_model, "prompt": query_text}),
-                    ("/api/embed", {"model": settings.embedding_model, "input": query_text}),
-                ]
+        for attempt in range(1, _EMBED_ATTEMPTS + 1):
+            # Attempt 1: fast timeout — model is already hot (~200 ms).
+            # Attempt 2+: slow timeout — covers Ollama model-swap time (3-15 s).
+            # Both /api/embeddings and /api/embed serve the same Ollama instance,
+            # so a timeout on one means the other will also time out.  We break
+            # after the first timeout instead of wasting time on the second endpoint.
+            is_retry = attempt > 1
+            timeout = _EMBED_TIMEOUT_SLOW if is_retry else _EMBED_TIMEOUT
+            if is_retry:
+                logger.info(
+                    "Embedding retry attempt=%d using extended timeout=%.0fs (model-swap wait)",
+                    attempt, timeout.read,
+                )
 
+            endpoint_payloads = [
+                ("/api/embeddings", {"model": settings.embedding_model, "prompt": query_text}),
+                ("/api/embed", {"model": settings.embedding_model, "input": query_text}),
+            ]
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 attempted_any = False
+                timed_out = False
                 for endpoint, payload in endpoint_payloads:
                     if _is_endpoint_on_cooldown(endpoint):
                         logger.debug("Embedding skip endpoint=%s reason=cooldown", endpoint)
@@ -388,67 +412,155 @@ async def embed_query(query_text: str) -> list[float]:
                         elapsed_ms = (time.perf_counter() - started) * 1000
                         logger.info(
                             "Embedding succeeded endpoint=%s attempt=%d elapsed_ms=%.0f dim=%d",
-                            endpoint,
-                            attempt,
-                            elapsed_ms,
-                            len(emb),
+                            endpoint, attempt, elapsed_ms, len(emb),
                         )
                         _record_embedding_success()
                         _put_cached_embedding(query_text, emb)
                         return emb
-                    except Exception as exc:
+                    except httpx.TimeoutException as exc:
+                        # Timeout means Ollama is loading the model (evicted by a running LLM),
+                        # NOT that the endpoint is broken.  Do NOT put it on cooldown — that
+                        # would block all subsequent requests for 45 s.
+                        # Break immediately: trying the second endpoint is pointless since both
+                        # hit the same Ollama process.
                         last_exc = exc
-                        _mark_endpoint_failed(endpoint)
                         elapsed_ms = (time.perf_counter() - started) * 1000
                         logger.warning(
-                            "Embedding attempt failed endpoint=%s attempt=%d elapsed_ms=%.0f error=%s",
-                            endpoint,
-                            attempt,
-                            elapsed_ms,
-                            exc,
+                            "Embedding timeout endpoint=%s attempt=%d elapsed_ms=%.0f — "
+                            "Ollama likely loading model; retry with extended timeout",
+                            endpoint, attempt, elapsed_ms,
                         )
+                        timed_out = True
+                        break  # don't try other endpoint, go to next attempt with slow timeout
+                    except Exception as exc:
+                        last_exc = exc
+                        elapsed_ms = (time.perf_counter() - started) * 1000
+                        logger.warning(
+                            "Embedding attempt failed endpoint=%s attempt=%d elapsed_ms=%.0f error=%s (%s)",
+                            endpoint, attempt, elapsed_ms, exc, type(exc).__name__,
+                        )
+                        if _is_non_retryable_embedding_error(exc):
+                            logger.warning(
+                                "Embedding endpoint=%s non-retryable status=%s",
+                                endpoint, exc.response.status_code,
+                            )
+                            continue
+                        # Real endpoint error (e.g. connection refused) — mark failed,
+                        # try the other endpoint.
+                        _mark_endpoint_failed(endpoint)
 
-                # If both endpoints are in cooldown, force one direct try on primary endpoint.
+                # If both endpoints are in cooldown (no attempt made), force a direct
+                # try using the slow timeout so the model can load.
                 if not attempted_any:
                     endpoint = "/api/embeddings"
                     payload = {"model": settings.embedding_model, "prompt": query_text}
+                    forced_timeout = _EMBED_TIMEOUT_SLOW
                     started = time.perf_counter()
                     try:
-                        resp = await client.post(f"{settings.ollama_base_url}{endpoint}", json=payload)
-                        resp.raise_for_status()
-                        body = resp.json()
-                        emb = body.get("embedding") or ((body.get("embeddings") or [None])[0])
-                        if not isinstance(emb, list):
-                            raise ValueError("Embedding response missing 'embedding(s)' field")
-                        _mark_endpoint_healthy(endpoint)
-                        elapsed_ms = (time.perf_counter() - started) * 1000
-                        logger.info(
-                            "Embedding succeeded endpoint=%s attempt=%d elapsed_ms=%.0f dim=%d (forced)",
-                            endpoint,
-                            attempt,
-                            elapsed_ms,
-                            len(emb),
-                        )
-                        _record_embedding_success()
-                        _put_cached_embedding(query_text, emb)
-                        return emb
+                        async with httpx.AsyncClient(timeout=forced_timeout) as forced_client:
+                            resp = await forced_client.post(f"{settings.ollama_base_url}{endpoint}", json=payload)
+                            resp.raise_for_status()
+                            body = resp.json()
+                            emb = body.get("embedding") or ((body.get("embeddings") or [None])[0])
+                            if not isinstance(emb, list):
+                                raise ValueError("Embedding response missing 'embedding(s)' field")
+                            _mark_endpoint_healthy(endpoint)
+                            elapsed_ms = (time.perf_counter() - started) * 1000
+                            logger.info(
+                                "Embedding succeeded endpoint=%s attempt=%d elapsed_ms=%.0f dim=%d (forced)",
+                                endpoint, attempt, elapsed_ms, len(emb),
+                            )
+                            _record_embedding_success()
+                            _put_cached_embedding(query_text, emb)
+                            return emb
                     except Exception as exc:
                         last_exc = exc
-                        _mark_endpoint_failed(endpoint)
                         elapsed_ms = (time.perf_counter() - started) * 1000
                         logger.warning(
-                            "Embedding forced attempt failed endpoint=%s attempt=%d elapsed_ms=%.0f error=%s",
-                            endpoint,
-                            attempt,
-                            elapsed_ms,
-                            exc,
+                            "Embedding forced attempt failed endpoint=%s attempt=%d elapsed_ms=%.0f error=%s (%s)",
+                            endpoint, attempt, elapsed_ms, exc, type(exc).__name__,
                         )
+                        if not isinstance(exc, httpx.TimeoutException):
+                            _mark_endpoint_failed(endpoint)
 
-                if attempt < _EMBED_ATTEMPTS:
-                    await asyncio.sleep(_EMBED_BACKOFF_SECONDS * attempt)
+            if attempt < _EMBED_ATTEMPTS:
+                await asyncio.sleep(_EMBED_BACKOFF_SECONDS * attempt)
 
     _record_embedding_failure()
     raise RuntimeError(f"Embedding failed after {_EMBED_ATTEMPTS} attempts: {last_exc}")
+
+
+async def warmup_embedding() -> bool:
+    """
+    Best-effort embedding warm-up called once at startup.
+    Uses a long timeout to survive cold model loading (Ollama loads from disk).
+    Does NOT count failures towards the circuit breaker, so the first real
+    user request is not penalised if warmup succeeds.
+    After a successful warmup the model stays loaded in Ollama memory and
+    subsequent calls complete in < 200 ms.
+    """
+    warmup_timeout = httpx.Timeout(connect=3.0, read=30.0, write=30.0, pool=3.0)
+    test_text = "bank account balance transfer"
+
+    endpoint_payloads = [
+        ("/api/embeddings", {"model": settings.embedding_model, "prompt": test_text}),
+        ("/api/embed", {"model": settings.embedding_model, "input": test_text}),
+    ]
+
+    logger.info(
+        "Embedding warmup: pre-loading model '%s' on %s",
+        settings.embedding_model,
+        settings.ollama_base_url,
+    )
+
+    # Retry loop: at startup Ollama may return 500 because qwen/granite is still
+    # loading.  We retry up to 3 times with a short pause so the warmup succeeds
+    # once Ollama has finished initialising the other model.
+    max_warmup_attempts = 3
+    warmup_retry_delay = 4.0
+
+    for warmup_attempt in range(1, max_warmup_attempts + 1):
+        if warmup_attempt > 1:
+            logger.info(
+                "Embedding warmup retry %d/%d (waiting for Ollama to become ready)",
+                warmup_attempt, max_warmup_attempts,
+            )
+            await asyncio.sleep(warmup_retry_delay)
+
+        async with httpx.AsyncClient(timeout=warmup_timeout) as client:
+            for endpoint, payload in endpoint_payloads:
+                started = time.perf_counter()
+                try:
+                    resp = await client.post(f"{settings.ollama_base_url}{endpoint}", json=payload)
+                    resp.raise_for_status()
+                    body = resp.json()
+                    if isinstance(body, dict) and isinstance(body.get("embedding"), list):
+                        emb = body["embedding"]
+                    elif isinstance(body, dict) and isinstance(body.get("embeddings"), list) and body["embeddings"]:
+                        emb = body["embeddings"][0]
+                    else:
+                        raise ValueError("Embedding response missing expected field")
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    logger.info(
+                        "Embedding warmup succeeded endpoint=%s attempt=%d elapsed_ms=%.0f dim=%d",
+                        endpoint, warmup_attempt, elapsed_ms, len(emb),
+                    )
+                    _record_embedding_success()
+                    _put_cached_embedding(test_text, emb)
+                    return True
+                except Exception as exc:
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    logger.warning(
+                        "Embedding warmup failed endpoint=%s attempt=%d elapsed_ms=%.0f error=%s (%s)",
+                        endpoint, warmup_attempt, elapsed_ms, exc, type(exc).__name__,
+                    )
+
+    logger.warning(
+        "Embedding warmup: model '%s' unavailable after %d attempts — hybrid search will use "
+        "sparse-only until the embedding service recovers",
+        settings.embedding_model, max_warmup_attempts,
+    )
+    return False
 
 
 @register_tool(
@@ -469,11 +581,15 @@ async def search_banking_knowledge(args: VectorSearchInput, memory=None) -> str:
     sparse_task = asyncio.create_task(_sparse_search_rows(args))
 
     # Step 2: Generate embedding
-    try:
-        embedding = await embed_query(args.query)
-    except Exception as exc:
-        logger.warning("Embedding failed: %s", exc)
-        embedding = None
+    embedding = None
+    if embedding_backend_degraded():
+        logger.info("Embedding backend degraded; continuing with sparse-only KB retrieval")
+    else:
+        try:
+            embedding = await embed_query(args.query)
+        except Exception as exc:
+            logger.warning("Embedding failed: %s", exc)
+            embedding = None
 
     # Step 3: Dimension guard
     if embedding is not None and len(embedding) != settings.embedding_dims:

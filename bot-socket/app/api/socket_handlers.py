@@ -29,6 +29,7 @@ Routing decision tree (executed before every agent loop call):
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import re
@@ -45,8 +46,10 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-def _extract_kb_prefetch_payload(result: str) -> tuple[str, float]:
-    """Handle both legacy markdown and structured JSON from KB search tool."""
+def _extract_kb_prefetch_payload(result: str) -> tuple[str, float, list]:
+    """Handle both legacy markdown and structured JSON from KB search tool.
+    Returns (context_text, confidence, sources).
+    """
     try:
         payload = json.loads(result)
     except (TypeError, json.JSONDecodeError):
@@ -55,19 +58,20 @@ def _extract_kb_prefetch_payload(result: str) -> tuple[str, float]:
     if isinstance(payload, dict) and payload.get("kind") == "kb_search_result":
         context_text = payload.get("context_markdown")
         if not isinstance(context_text, str) or not context_text.strip():
-            return "", 0.0
+            return "", 0.0, []
 
         sources = payload.get("sources")
         if isinstance(sources, list):
             n = len(sources)
             confidence = 0.8 if n >= 2 else 0.55
         else:
+            sources = []
             confidence = 0.4
-        return context_text, confidence
+        return context_text, confidence, sources
 
     text = result or ""
     if not text or "unavailable" in text.lower() or "No specific articles" in text:
-        return "", 0.0
+        return "", 0.0, []
 
     match = re.search(r"Found (\d+) relevant", text)
     if match:
@@ -75,7 +79,237 @@ def _extract_kb_prefetch_payload(result: str) -> tuple[str, float]:
         confidence = 0.8 if n >= 2 else 0.55
     else:
         confidence = 0.4
-    return text, confidence
+    return text, confidence, []
+
+
+# Words that, on their own, constitute a genuine farewell.
+# Plain Python set — no regex, no hardcoded language patterns.
+_FAREWELL_TOKENS: frozenset[str] = frozenset({
+    "thanks", "thank", "you", "bye", "goodbye", "done", "ok", "okay",
+    "alright", "all", "that's", "thats", "see", "later", "good", "day",
+    "night", "take", "care", "nothing", "else", "no", "more",
+})
+
+
+def _is_real_question(message: str) -> bool:
+    """Return True when the message is a substantive query, not a pure farewell.
+
+    The LLM classifier is the primary gate; this is a cheap safety net only.
+    Logic: messages longer than 5 tokens, containing '?', or whose tokens are
+    not ALL farewell words are treated as real questions — no regex needed.
+    """
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if "?" in msg:
+        return True
+    tokens = [t.lower().strip(".,!'") for t in msg.split()]
+    if len(tokens) > 5:
+        return True
+    # Every token must be a known farewell word to treat this as a close
+    return not all(t in _FAREWELL_TOKENS for t in tokens)
+
+
+def _fallback_handoff_text_for_message(message: str, language: str = "en") -> str:
+    import random
+    msg_lc = (message or "").lower()
+    is_bn = language == "bn" or bool(re.search(r"[\u0980-\u09FF]", message or ""))
+
+    _POOLS: list[tuple[str, list[str], list[str]]] = [
+        (
+            r"transfer|send|remit",
+            [
+                "Let me find the right transfer steps for you.",
+                "Checking the transfer options for your request.",
+                "Looking up how to transfer \u2014 one moment.",
+            ],
+            [
+                "\u099f\u09cd\u09b0\u09be\u09a8\u09cd\u09b8\u09ab\u09be\u09b0\u09c7\u09b0 \u09b8\u09a0\u09bf\u0995 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u0964",
+                "\u0986\u09aa\u09a8\u09be\u09b0 \u099f\u09cd\u09b0\u09be\u09a8\u09cd\u09b8\u09ab\u09be\u09b0 \u0985\u09a8\u09c1\u09b0\u09cb\u09a7\u09c7\u09b0 \u09a4\u09a5\u09cd\u09af \u09a6\u09c7\u0996\u099b\u09bf\u0964",
+            ],
+        ),
+        (
+            r"balance|statement|history",
+            [
+                "Pulling together the account details for you.",
+                "Let me check that account information.",
+                "Looking up your account info now.",
+            ],
+            [
+                "\u0985\u09cd\u09af\u09be\u0995\u09be\u0989\u09a8\u09cd\u099f\u09c7\u09b0 \u09a4\u09a5\u09cd\u09af \u09a6\u09c7\u0996\u099b\u09bf\u0964",
+                "\u09ac\u09cd\u09af\u09be\u09b2\u09c7\u09a8\u09cd\u09b8 \u09b8\u0982\u0995\u09cd\u09b0\u09be\u09a8\u09cd\u09a4 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u0964",
+            ],
+        ),
+        (
+            r"card|debit|credit|atm|pin",
+            [
+                "Looking up the card-related steps for you.",
+                "Checking card information \u2014 just a moment.",
+                "Let me find the right card details.",
+            ],
+            [
+                "\u0995\u09be\u09b0\u09cd\u09a1 \u09b8\u0982\u0995\u09cd\u09b0\u09be\u09a8\u09cd\u09a4 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u0964",
+                "\u0995\u09be\u09b0\u09cd\u09a1\u09c7\u09b0 \u09a7\u09be\u09aa\u0997\u09c1\u09b2\u09cb \u09a6\u09c7\u0996\u099b\u09bf\u0964",
+            ],
+        ),
+        (
+            r"loan|emi|installment",
+            [
+                "Checking the loan details that match your question.",
+                "Looking up loan information for you.",
+                "Let me find the relevant loan details.",
+            ],
+            [
+                "\u098b\u09a3 \u09b8\u0982\u0995\u09cd\u09b0\u09be\u09a8\u09cd\u09a4 \u09a4\u09a5\u09cd\u09af \u09a6\u09c7\u0996\u099b\u09bf\u0964",
+                "\u09b2\u09cb\u09a8\u09c7\u09b0 \u09ac\u09bf\u09b8\u09cd\u09a4\u09be\u09b0\u09bf\u09a4 \u0996\u09c1\u0981\u099c\u099b\u09bf\u0964",
+            ],
+        ),
+        (
+            r"account|open|close|kyc",
+            [
+                "Checking the account-service details for you.",
+                "Looking up how to help with your account.",
+                "Finding the right account information.",
+            ],
+            [
+                "\u0985\u09cd\u09af\u09be\u0995\u09be\u0989\u09a8\u09cd\u099f \u09b8\u09c7\u09ac\u09be\u09b0 \u09a4\u09a5\u09cd\u09af \u09a6\u09c7\u0996\u099b\u09bf\u0964",
+                "\u0985\u09cd\u09af\u09be\u0995\u09be\u0989\u09a8\u09cd\u099f \u09b8\u0982\u0995\u09cd\u09b0\u09be\u09a8\u09cd\u09a4 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u0964",
+            ],
+        ),
+    ]
+    for pattern, en_pool, bn_pool in _POOLS:
+        if re.search(rf"\b({pattern})\b", msg_lc):
+            return random.choice(bn_pool if is_bn else en_pool)
+
+    default_en = [
+        "Let me find the right information for you.",
+        "Checking the details for your request.",
+        "Looking that up for you now.",
+    ]
+    default_bn = [
+        "\u0986\u09aa\u09a8\u09be\u09b0 \u099c\u09a8\u09cd\u09af \u09b8\u09a0\u09bf\u0995 \u09a4\u09a5\u09cd\u09af\u099f\u09bf \u0996\u09c1\u0981\u099c\u099b\u09bf\u0964",
+        "\u0986\u09aa\u09a8\u09be\u09b0 \u0985\u09a8\u09c1\u09b0\u09cb\u09a7\u09c7\u09b0 \u09ac\u09bf\u09b8\u09cd\u09a4\u09be\u09b0\u09bf\u09a4 \u09a6\u09c7\u0996\u099b\u09bf\u0964",
+    ]
+    return random.choice(default_bn if is_bn else default_en)
+
+
+# ── Progressive thinking status steps ─────────────────────────────────────
+
+_STATUS_STEPS: dict[str, tuple[list[str], list[str]]] = {
+    "fund_transfer": (
+        ["Searching transfer methods\u2026", "Found relevant guides\u2026", "Preparing step-by-step instructions\u2026"],
+        ["\u099f\u09cd\u09b0\u09be\u09a8\u09cd\u09b8\u09ab\u09be\u09b0 \u09aa\u09a6\u09cd\u09a7\u09a4\u09bf \u0996\u09c1\u0981\u099c\u099b\u09bf\u2026", "\u09aa\u09cd\u09b0\u09be\u09b8\u0999\u09cd\u0997\u09bf\u0995 \u0997\u09be\u0987\u09a1 \u09aa\u09c7\u09af\u09bc\u09c7\u099b\u09bf\u2026", "\u09a7\u09be\u09aa\u0997\u09c1\u09b2\u09cb \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u0995\u09b0\u099b\u09bf\u2026"],
+    ),
+    "card_services": (
+        ["Looking up card procedures\u2026", "Checking card information\u2026", "Almost ready\u2026"],
+        ["\u0995\u09be\u09b0\u09cd\u09a1 \u09b8\u0982\u0995\u09cd\u09b0\u09be\u09a8\u09cd\u09a4 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u2026", "\u09aa\u09cd\u09b0\u09be\u09b8\u0999\u09cd\u0997\u09bf\u0995 \u09a4\u09a5\u09cd\u09af \u09aa\u09c7\u09af\u09bc\u09c7\u099b\u09bf\u2026", "\u0989\u09a4\u09cd\u09a4\u09b0 \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u0995\u09b0\u099b\u09bf\u2026"],
+    ),
+    "account_inquiry": (
+        ["Pulling account details\u2026", "Found relevant information\u2026", "Preparing your answer\u2026"],
+        ["\u0985\u09cd\u09af\u09be\u0995\u09be\u0989\u09a8\u09cd\u099f\u09c7\u09b0 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u2026", "\u09aa\u09cd\u09b0\u09be\u09b8\u0999\u09cd\u0997\u09bf\u0995 \u09a4\u09a5\u09cd\u09af \u09aa\u09c7\u09af\u09bc\u09c7\u099b\u09bf\u2026", "\u0989\u09a4\u09cd\u09a4\u09b0 \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u0995\u09b0\u099b\u09bf\u2026"],
+    ),
+    "loan_services": (
+        ["Checking loan information\u2026", "Found loan details\u2026", "Preparing your answer\u2026"],
+        ["\u098b\u09a3 \u09b8\u0982\u0995\u09cd\u09b0\u09be\u09a8\u09cd\u09a4 \u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u2026", "\u09ac\u09bf\u09b8\u09cd\u09a4\u09be\u09b0\u09bf\u09a4 \u09a4\u09a5\u09cd\u09af \u09aa\u09c7\u09af\u09bc\u09c7\u099b\u09bf\u2026", "\u0989\u09a4\u09cd\u09a4\u09b0 \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u0995\u09b0\u099b\u09bf\u2026"],
+    ),
+}
+_STATUS_DEFAULT_EN = ["Searching knowledge base\u2026", "Found relevant articles\u2026", "Preparing your answer\u2026"]
+_STATUS_DEFAULT_BN = ["\u09a4\u09a5\u09cd\u09af \u0996\u09c1\u0981\u099c\u099b\u09bf\u2026", "\u09aa\u09cd\u09b0\u09be\u09b8\u0999\u09cd\u0997\u09bf\u0995 \u09a4\u09a5\u09cd\u09af \u09aa\u09c7\u09af\u09bc\u09c7\u099b\u09bf\u2026", "\u0986\u09aa\u09a8\u09be\u09b0 \u0989\u09a4\u09cd\u09a4\u09b0 \u09aa\u09cd\u09b0\u09b8\u09cd\u09a4\u09c1\u09a4 \u0995\u09b0\u099b\u09bf\u2026"]
+
+
+def _get_status_steps(intent: str, language: str) -> list[str]:
+    is_bn = language == "bn"
+    en_steps, bn_steps = _STATUS_STEPS.get(intent, (_STATUS_DEFAULT_EN, _STATUS_DEFAULT_BN))
+    return bn_steps if is_bn else en_steps
+
+
+async def _run_status_loop(
+    emit_fn,
+    steps: list,
+    stop_event,
+    interval: float = 1.8,
+) -> None:
+    """Emit progressive thinking_status labels until stop_event fires or steps exhausted."""
+    import asyncio as _asyncio
+    for step in steps:
+        if stop_event.is_set():
+            return
+        try:
+            await emit_fn("thinking_status", {"label": step})
+        except Exception:
+            return
+        deadline = _asyncio.get_event_loop().time() + interval
+        while not stop_event.is_set():
+            remaining = deadline - _asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            await _asyncio.sleep(min(0.1, remaining))
+
+
+def _sanitize_handoff_text(text: str, fallback: str) -> str:
+    value = (text or "").strip().strip('"\'')
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"^(assistant|bot)\s*:\s*", "", value, flags=re.IGNORECASE)
+    if not value:
+        return fallback
+    if value.endswith("?"):
+        value = value.rstrip("?!. ") + "."
+    if len(value) > 140:
+        value = value[:140].rsplit(" ", 1)[0].rstrip(" ,.;:") + "."
+    return value or fallback
+
+
+async def _generate_dynamic_handoff_text(message: str) -> str:
+    """
+    Use the fast Granite classifier model as a tiny acknowledgment generator.
+    This is separate from the heavier classifier JSON prompt, so the first
+    streamed sentence can stay aligned with the user's exact request.
+    """
+    fallback = _fallback_handoff_text_for_message(message)
+    try:
+        from litellm import acompletion
+
+        model = settings.classifier_model or settings.model_name
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are writing the assistant's first short acknowledgment sentence "
+                        "for a banking chatbot. Reply with exactly one plain-text sentence. "
+                        "Briefly reflect the user's request and say you are checking or preparing "
+                        "the right information. Do not answer the question yet. "
+                        "No markdown. No bullets. No JSON. No role labels."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"User message: {message}",
+                },
+            ],
+            "temperature": 0.1,
+            "stream": False,
+            "max_tokens": 24,
+        }
+
+        is_ollama = (
+            "11434" in settings.ollama_base_url
+            or "ollama" in settings.ollama_base_url.lower()
+        )
+        if is_ollama and "/" not in model:
+            kwargs["model"] = f"ollama/{model}"
+        if "ollama/" in kwargs["model"]:
+            kwargs["api_base"] = settings.ollama_base_url
+            if not settings.llm_thinking:
+                kwargs["extra_body"] = {"think": False}
+
+        response = await acompletion(**kwargs)
+        content = (response.choices[0].message.content or "").strip()
+        return _sanitize_handoff_text(content, fallback)
+    except Exception as exc:
+        logger.debug("Dynamic handoff generation failed: %s", exc)
+        return fallback
 
 # ── Socket.IO server ───────────────────────────────────────────────────────
 
@@ -430,12 +664,15 @@ _NO_DATA_FALLBACK_CHIPS: list[dict] = [
 
 # ── KB pre-fetch helper ────────────────────────────────────────────────────
 
-async def _prefetch_kb(query: str) -> tuple[str, float]:
+async def _prefetch_kb(query: str) -> tuple[str, float, list]:
     """
     Pre-fetch knowledge base context in parallel with intent classification.
-    Returns (context_text, confidence_score).
+    Returns (context_text, confidence_score, sources).
     Confidence: 0.8 = strong (2+ results), 0.55 = partial (1 result),
                 0.4 = keyword fallback, 0.0 = no match / error.
+    When embeddings are degraded (sparse-only mode), confidence is capped at
+    0.55 so sparse-only results never trigger the strong_kb_answer_ready path,
+    which would surface irrelevant keyword-matched articles as authoritative.
     """
     try:
         from app.tools.vector_search import (
@@ -443,16 +680,25 @@ async def _prefetch_kb(query: str) -> tuple[str, float]:
             VectorSearchInput,
             embedding_backend_degraded,
         )
-        if embedding_backend_degraded():
-            logger.info("[KB prefetch] skipped: embedding backend degraded")
-            return "", 0.0
         result = await search_banking_knowledge(VectorSearchInput(query=query, top_k=3))
-        context_text, confidence = _extract_kb_prefetch_payload(result)
-        logger.debug("[KB prefetch] confidence=%.2f result_len=%d", confidence, len(context_text))
-        return context_text, confidence
+        context_text, confidence, sources = _extract_kb_prefetch_payload(result)
+        # If the embedding model was unavailable during this prefetch, the search
+        # used sparse BM25 only.  BM25 matches on keywords ("account", "money")
+        # and returns semantically wrong results for transfer queries.  Cap
+        # confidence so the agent uses its tool loop instead.
+        if embedding_backend_degraded():
+            capped = min(confidence, 0.55)
+            if capped < confidence:
+                logger.info(
+                    "[KB prefetch] embedding degraded — capping confidence %.2f → %.2f (sparse-only results)",
+                    confidence, capped,
+                )
+            confidence = capped
+        logger.debug("[KB prefetch] confidence=%.2f result_len=%d sources=%d", confidence, len(context_text), len(sources))
+        return context_text, confidence, sources
     except Exception as exc:
         logger.warning("KB prefetch failed: %s", exc)
-        return "", 0.0
+        return "", 0.0, []
 
 
 # ── Chip builder helper ────────────────────────────────────────────────────
@@ -684,7 +930,10 @@ async def _route_message(
         return
 
     # ── 4a. Conversation complete → inline closure, no chips ──────────────
-    if classification.assistant_action == "close_conversation":
+    # Guard: only honour close_conversation when the message actually looks like
+    # a sign-off. If the message contains banking keywords or a question mark the
+    # classifier hallucinated the action — fall through to the agent loop instead.
+    if classification.assistant_action == "close_conversation" and not _is_real_question(raw_message):
         if classification.language == "bn":
             closure = "আপনাকে সহায়তা করতে পেরে ভালো লাগলো! যেকোনো সময় প্রয়োজন হলে নির্দ্বিধায় আমাদের সাথে যোগাযোগ করুন! শুভদিন কাটসুন!"
         elif classification.language == "hinglish":
@@ -708,7 +957,24 @@ async def _route_message(
         return
 
     # ── 4b. Low-confidence disambiguation → ask clarifying question ───────
-    if classification.assistant_action == "ask_clarification":
+    # Only catch genuinely ambiguous / low-confidence input here.
+    # High-confidence specific banking queries (e.g. "block or replace my card",
+    # intent=card_services conf=0.95) should fall through to the agent loop so
+    # the main model can answer all aspects of the question intelligently.
+    # Threshold: confidence < 0.65 OR no specific intent identified.
+    _is_truly_ambiguous = (
+        classification.confidence < 0.65
+        or classification.intent in ("general_faq",)
+    )
+    # Never treat "explain more / re-clarification" requests as ambiguous dead-ends —
+    # those have is_clarification=True and belong in step 4d (re-explain LLM path).
+    # Blocking them here produces hard-coded "are you done?" replies even when the
+    # user just asked for elaboration, which also breaks multilingual phrasing.
+    if (
+        classification.assistant_action == "ask_clarification"
+        and _is_truly_ambiguous
+        and not classification.is_clarification
+    ):
         if classification.language == "bn":
             disambig = "ক্ষমাকরুন, আমি নিশ্চিত হতে চাইছি — আপনি কি সারা হয়েছেন, নাকি আরও কোনো সাহায্যের প্রয়োজন আছে?"
         else:
@@ -868,6 +1134,26 @@ async def _route_message(
     # kb_task was already created before classify_intent (parallel execution).
     _log_route(conversation_id, "branch_agent_loop", reason="no_flow_or_special_action")
 
+    handoff_text = str(getattr(classification, "handoff_text", "") or "").strip()
+    handoff_text = _sanitize_handoff_text(
+        handoff_text,
+        _fallback_handoff_text_for_message(raw_message, language=classification.language),
+    )
+    if handoff_text:
+        await emit_fn("thinking_end", {})
+        await emit_fn("text_delta", {"delta": handoff_text + " "})
+        await emit_fn("thinking_start", {})
+
+    # Progressive status updates while KB fetches + LLM warms up
+    _status_stop = asyncio.Event()
+    _status_task: asyncio.Task = asyncio.create_task(
+        _run_status_loop(
+            emit_fn,
+            _get_status_steps(classification.intent, classification.language),
+            _status_stop,
+        )
+    )
+
     async def _push_chips_bg() -> list[dict]:
         chips = _build_chips(classification)
         await emit_fn("chips_update", {"suggestedActions": chips})
@@ -887,12 +1173,12 @@ async def _route_message(
         else settings.kb_prefetch_timeout_ms
     )
     try:
-        kb_context, kb_confidence = await asyncio.wait_for(
+        kb_context, kb_confidence, kb_sources = await asyncio.wait_for(
             kb_task,
             timeout=max(0.1, prefetch_timeout_ms / 1000.0),
         )
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        kb_context, kb_confidence = "", 0.0
+        kb_context, kb_confidence, kb_sources = "", 0.0, []
         logger.warning("[%s] KB prefetch timed out — LLM will use tools if needed", conversation_id)
     kb_wait_ms = (time.perf_counter() - kb_wait_started) * 1000
     logger.info(
@@ -921,10 +1207,13 @@ async def _route_message(
         "_clarification_count": current_state.get("_clarification_count", 0),
         "_kb_context": kb_context,
         "_kb_confidence": kb_confidence,
+        "_kb_sources": kb_sources,
+        "_intent": classification.intent,
         "_assistant_action": classification.assistant_action,
         "_conversation_act": classification.conversation_act,
         "_classifier_confidence": classification.confidence,
         "_last_bot_message": last_bot,
+        "_preface_text": handoff_text,
         "_disable_kb_tool": disable_kb_tool,
         "_kb_unavailable": disable_kb_tool,
     })
@@ -941,17 +1230,21 @@ async def _route_message(
         memory.update_state(current_state)
 
     guarded_emit, finalize_guardrail = _make_guardrail_emit(emit_fn, conversation_id)
-    usage = await run_agent_loop_with_emitter(
-        message=raw_message,
-        conversation_id=conversation_id,
-        memory=memory,
-        emit_fn=guarded_emit,
-        profile_name=profile_name,
-        context=enriched_context,
-        session_state=None,
-        suggested_actions=classification.suggested_actions or [],
-        skip_initial_thinking=True,
-    )
+    try:
+        usage = await run_agent_loop_with_emitter(
+            message=raw_message,
+            conversation_id=conversation_id,
+            memory=memory,
+            emit_fn=guarded_emit,
+            profile_name=profile_name,
+            context=enriched_context,
+            session_state=None,
+            suggested_actions=classification.suggested_actions or [],
+            skip_initial_thinking=True,
+        )
+    finally:
+        _status_stop.set()
+        _status_task.cancel()
     if not isinstance(usage, dict):
         usage = {"promptTokens": 0, "completionTokens": 0}
     await finalize_guardrail()

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage } from "@/store/types";
+import type { ChatMessage, ThinkingMessage } from "@/store/types";
 import { UserMessage } from "./UserMessage";
 import { AgentMessage } from "./AgentMessage";
 import { ToolCallMessage } from "./ToolCallMessage";
@@ -37,7 +37,7 @@ export function MessageDispatcher({ message }: Props) {
       return <SourceBlocksMessage message={message} />;
 
     case "thinking":
-      return <ThinkingIndicator />;
+      return <ThinkingIndicator label={(message as ThinkingMessage).label} />;
 
     default:
       // Exhaustive check — TypeScript will flag unhandled union members

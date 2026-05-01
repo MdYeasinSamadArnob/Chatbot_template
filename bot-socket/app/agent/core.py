@@ -296,6 +296,7 @@ async def _call_llm(
         "messages": messages,
         "temperature": temperature,
         "stream": False,
+        "timeout": settings.llm_request_timeout_seconds,
     }
 
     # Auto-detect Ollama: if api_base points to Ollama and no provider prefix
@@ -340,6 +341,7 @@ async def _stream_llm_with_emitter(
         "messages": messages,
         "temperature": temperature,
         "stream": True,
+        "timeout": settings.llm_request_timeout_seconds,
     }
     is_ollama_base = "11434" in settings.ollama_base_url or "ollama" in settings.ollama_base_url.lower()
     model_has_prefix = "/" in settings.model_name
@@ -791,20 +793,43 @@ async def run_agent_loop_with_emitter(
     )
 
     # ── Confidence-gated KB injection ──────────────────────────────────
-    # context["_kb_context"] / context["_kb_confidence"] are pre-populated
-    # by socket_handlers via parallel _prefetch_kb() execution.
+    # context["_kb_context"] / context["_kb_confidence"] / context["_kb_sources"]
+    # are pre-populated by socket_handlers via parallel _prefetch_kb() execution.
     kb_ctx = str(context.get("_kb_context", "") or "")
     kb_conf = float(context.get("_kb_confidence", 0.0) or 0.0)
+    kb_sources: list = context.get("_kb_sources") or []
+    if not isinstance(kb_sources, list):
+        kb_sources = []
+    preface_text = str(context.get("_preface_text", "") or "").strip()
     if kb_ctx:
         if kb_conf > 0.6:
+            # Build source titles so the model can immediately see if the articles are relevant
+            source_titles_str = ", ".join(
+                f'"{s.get("document_title", "Unknown")}"' for s in kb_sources[:5]
+            ) if kb_sources else "(titles unavailable)"
             system_prompt += (
-                "\n\n## Retrieved Knowledge\n"
+                f"\n\n## Retrieved Knowledge\nArticles retrieved: {source_titles_str}\n\n"
                 + kb_ctx
-                + "\n\nUse the Retrieved Knowledge above before calling "
-                "`search_banking_knowledge`. Only call the tool if you need "
-                "fresher or more specific information not already covered."
+                + "\n\n"
+                "IMPORTANT — relevance check before answering:\n"
+                "1. Read the article titles listed above. Do they cover the user's actual question?\n"
+                "   - YES → go to step 2.\n"
+                "   - NO (wrong topic) → call `search_banking_knowledge` with a precise query for the real topic.\n"
+                "     Do NOT generate banking procedures from training memory.\n"
+                "2. Are there 2 or more articles that each describe a DIFFERENT method/type for the same task\n"
+                "   (e.g. 'Credit Card Transfer Instructions', 'Own Bank Transfer Instructions', 'bKash Transfer Instructions')?\n"
+                "   - YES (multiple distinct methods) → do NOT dump all steps. Instead:\n"
+                "     a. Give one short sentence introducing the available methods.\n"
+                "     b. List each method as a bullet (name only, no steps).\n"
+                "     c. Ask: 'Which method would you like step-by-step instructions for?'\n"
+                "     Wait for the user's reply before providing detailed steps.\n"
+                "   - NO (articles all describe the same procedure) → present the exact steps from the articles.\n"
+                "3. If `search_banking_knowledge` returns no matching results → respond:\n"
+                "   'I don't have specific information about that in our knowledge base. "
+                "Please contact Bank Asia support at our helpline for accurate guidance.'\n"
+                "4. Do NOT combine steps from different methods into a single numbered list."
             )
-            logger.debug("[%s] Strong KB injected (confidence=%.2f)", conversation_id, kb_conf)
+            logger.debug("[%s] Strong KB injected (confidence=%.2f) sources=%s", conversation_id, kb_conf, source_titles_str)
         elif kb_conf > 0.3:
             system_prompt += (
                 "\n\n## Potentially Relevant Knowledge (verify before using)\n"
@@ -820,16 +845,84 @@ async def run_agent_loop_with_emitter(
             "Knowledge-base retrieval is temporarily unavailable for this turn. "
             "Answer directly from reliable banking guidance and do not attempt KB tool calls."
         )
+    if preface_text:
+        system_prompt += (
+            "\n\n## Already Streamed To User\n"
+            f'The assistant has already shown this short lead-in to the user: "{preface_text}"\n'
+            "Continue naturally from that sentence without repeating it verbatim."
+        )
+
+    strong_kb_answer_ready = (
+        kb_conf >= 0.75
+        and bool(kb_ctx)
+        and str(context.get("_assistant_action", "") or "") in {"answer_with_rag", "continue_flow"}
+        and not bool(context.get("_kb_unavailable"))
+    )
+
+    # Guard: verify retrieved articles are actually on-topic for this query.
+    # If all source titles are from a clearly different domain, the prefetch
+    # matched on weak keyword overlap (BM25/HNSW near-miss).  In that case
+    # fall through to the normal tool-call path so the agent can search more
+    # precisely — do NOT force streaming with irrelevant articles.
+    if strong_kb_answer_ready and kb_sources:
+        import re as _re
+        intent = str(context.get("_intent", "") or "").lower()
+        # Split intent on underscores: "card_services" → ["card", "services"]
+        # These are always English regardless of user language.
+        intent_words = [w for w in intent.replace("_", " ").split() if len(w) > 3]
+        # Extract only ASCII words from the user message — safe for multilingual:
+        # Bengali/Arabic words won't match English source titles anyway, so we
+        # only pick up English words the user happened to type.
+        ascii_msg_words = _re.findall(r'[a-z]{4,}', message.lower())
+        _stop = {
+            "what", "when", "where", "which", "does", "have", "that", "this",
+            "with", "from", "will", "your", "about", "into", "more", "some",
+            "please", "could", "would", "should", "tell", "show", "help",
+        }
+        topic_words = (set(intent_words) | set(ascii_msg_words)) - _stop
+
+        # Check if any retrieved source title shares at least one topic word
+        def _titles_relevant(sources: list, words: set) -> bool:
+            for src in sources:
+                title_lower = (src.get("document_title") or "").lower()
+                if any(w in title_lower for w in words):
+                    return True
+            return False
+
+        if topic_words and not _titles_relevant(kb_sources, topic_words):
+            strong_kb_answer_ready = False
+            logger.info(
+                "[%s] strong_kb CANCELLED — source titles are off-topic "
+                "(topic_words=%s, titles=%s)",
+                conversation_id,
+                sorted(topic_words)[:8],
+                [s.get("document_title", "") for s in kb_sources],
+            )
+    if strong_kb_answer_ready:
+        system_prompt += (
+            "\n\n## Tool Policy For This Turn\n"
+            "Retrieved articles are listed above with their titles. "
+            "If those articles directly address the user's question and all describe the SAME procedure, reproduce their steps faithfully. "
+            "If the articles describe DIFFERENT methods for the same task, list the method names and ask which one the user wants — do NOT merge steps from different methods. "
+            "If the article titles are off-topic, call `search_banking_knowledge` to find the correct article. "
+            "Never generate unverified banking procedures from training memory."
+        )
+        logger.info("[%s] Strong KB available; forcing direct streamed answer", conversation_id)
+        # Emit pre-fetched sources immediately so the UI can display them
+        # alongside the streamed answer (no tool call needed in this path).
+        if kb_sources:
+            logger.info("[%s] Emitting %d pre-fetched KB sources (strong_kb path)", conversation_id, len(kb_sources))
+            await emit_fn("sources", {"sources": kb_sources})
 
     profile_tools = profile.get_tools()
     if context.get("_disable_kb_tool"):
         profile_tools = [t for t in profile_tools if t.name != "search_banking_knowledge"]
-    tools_schema = [t.to_openai_tool() for t in profile_tools] if profile_tools else None
+    tools_schema = None if strong_kb_answer_ready else ([t.to_openai_tool() for t in profile_tools] if profile_tools else None)
 
     prompt_tokens_total = 0
     completion_tokens_total = 0
     consecutive_tool_errors = 0  # break loop if LLM keeps hallucinating tools
-    answer_text_parts: list[str] = []  # accumulate final answer for memory summarization
+    answer_text_parts: list[str] = [preface_text] if preface_text else []
 
     if not skip_initial_thinking:
         await emit_fn("thinking_start", {})

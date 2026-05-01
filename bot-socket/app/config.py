@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     embedding_breaker_failure_threshold: int = 3
     embedding_breaker_cooldown_seconds: int = 45
 
+    # ── LLM request timeout ─────────────────────────────────────────────
+    # Max seconds to wait for a single LLM completion (non-stream or stream).
+    # Prevents indefinite hangs when Ollama is loading cold or crashes.
+    llm_request_timeout_seconds: float = 90.0
+
     # ── Banking branding ─────────────────────────────────────────────────
     bank_name: str = "MyBank"
 

@@ -55,6 +55,7 @@ type ListenEvents = {
   history: (data: { messages: Array<{ role: string; content: string }> }) => void;
   thinking_start: () => void;
   thinking_end: () => void;
+  thinking_status: (data: { label?: string }) => void;
   text_delta: (data: { delta?: string; text?: string }) => void;
   tool_call: (data: { toolCallId: string; toolName: string; args: Record<string, unknown>; announcement?: string }) => void;
   tool_result: (data: { toolCallId: string; result: string }) => void;

@@ -137,11 +137,103 @@ _SMALL_TALK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "how to/do/can X" patterns are new banking questions, not clarifications.
+_HOW_NEW_QUESTION_RE = re.compile(
+    r"^how\s+(to|do|can|would|should|could|is|are|does)\b",
+    re.IGNORECASE,
+)
+
 _AFFIRMATIVE_SHORT_RE = re.compile(
     r"^\s*(yes|yes\s+please|yeah|yep|sure|okay|ok|continue|go\s+ahead|হ্যাঁ|জি|ঠিক\s+আছে|acha|haan)\s*[.!]*\s*$",
     re.IGNORECASE,
 )
 
+
+def _default_handoff_text(
+    assistant_action: str,
+    intent_name: str,
+    language: str,
+) -> str:
+    """Short bridge text streamed while the main answer is still being prepared."""
+    import random
+
+    if language == "bn":
+        if assistant_action == "re_explain":
+            return random.choice([
+                "আমি সহজ করে আবার বুঝিয়ে দিচ্ছি।",
+                "চলুন আরেকটু সহজভাবে বলি।",
+                "আবার একটু পরিষ্কার করে বলছি।",
+            ])
+        if assistant_action == "escalate":
+            return "আমি এখনই আপনাকে সাপোর্ট এজেন্টের সাথে যুক্ত করছি।"
+        _BN_POOLS: dict[str, list[str]] = {
+            "fund_transfer": [
+                "ট্রান্সফারের সঠিক ধাপগুলো দেখে নিচ্ছি।",
+                "ট্রান্সফার পদ্ধতি খুঁজে দিচ্ছি।",
+                "সেরা ট্রান্সফার অপশনটি দেখছি।",
+            ],
+            "card_services": [
+                "কার্ড সংক্রান্ত তথ্য দেখছি।",
+                "কার্ডের ধাপগুলো খুঁজে নিচ্ছি।",
+            ],
+            "account_inquiry": [
+                "অ্যাকাউন্টের তথ্য দেখছি।",
+                "অ্যাকাউন্ট সংক্রান্ত বিস্তারিত খুঁজছি।",
+            ],
+            "loan_services": [
+                "ঋণ সংক্রান্ত তথ্য দেখছি।",
+                "লোনের বিস্তারিত খুঁজছি।",
+            ],
+        }
+        pool = _BN_POOLS.get(intent_name)
+        if pool:
+            return random.choice(pool)
+        return random.choice([
+            "আপনার জন্য সঠিক তথ্যটি দেখে নিচ্ছি।",
+            "এক মুহূর্ত — তথ্য খুঁজছি।",
+            "আপনার প্রশ্নের উত্তর খুঁজছি।",
+        ])
+
+    if assistant_action == "re_explain":
+        return random.choice([
+            "Let me explain that more clearly.",
+            "Let me try that again with a simpler explanation.",
+            "Sure, let me break that down differently.",
+        ])
+    if assistant_action == "escalate":
+        return "Connecting you with a support agent now."
+
+    _EN_POOLS: dict[str, list[str]] = {
+        "fund_transfer": [
+            "Let me find the right transfer steps for you.",
+            "Checking the transfer options for your request.",
+            "Looking up the transfer details now.",
+        ],
+        "card_services": [
+            "Looking up the card-related steps for you.",
+            "Checking card information — just a moment.",
+            "Let me find the right card details.",
+        ],
+        "account_inquiry": [
+            "Pulling the account details you need.",
+            "Let me check that account information.",
+            "Looking up your account info now.",
+        ],
+        "loan_services": [
+            "Checking the loan details for you.",
+            "Looking up loan information now.",
+            "Let me find the relevant loan details.",
+        ],
+    }
+    pool = _EN_POOLS.get(intent_name)
+    if pool:
+        return random.choice(pool)
+    return random.choice([
+        "Let me find the right information for you.",
+        "Checking the details for your request.",
+        "Looking that up for you now.",
+        "One moment while I check that for you.",
+    ])
 
 # ── Mapping: assistant_action → reply_style ──────────────────────────────
 
@@ -181,6 +273,64 @@ _VALID_ASSISTANT_ACTIONS = frozenset({
 })
 
 
+def _parse_classifier_structured_output(raw: str) -> dict[str, object] | None:
+    """
+    Accept either JSON or a compact tagged block.
+
+    Tagged format example:
+    INTENT: money_transfer
+    CONFIDENCE: 0.92
+    ACT: normal_banking_query
+    ACTION: answer_with_rag
+    LANGUAGE: en
+    SENTIMENT: neutral
+    HANDOFF_TEXT: I’m checking the transfer details for you.
+    NEXT_LIKELY: check_balance|account_services
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    json_match = re.search(r"\{[\s\S]*\}", raw)
+    if json_match:
+        try:
+            data = json.loads(json_match.group())
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    fields: dict[str, str] = {}
+    for line in raw.splitlines():
+        match = re.match(r"^\s*([A-Z_]+)\s*:\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        key, value = match.groups()
+        fields[key] = value
+
+    if not fields:
+        return None
+
+    next_likely_raw = fields.get("NEXT_LIKELY", "")
+    next_likely = [
+        item.strip()
+        for item in re.split(r"[|,]", next_likely_raw)
+        if item.strip()
+    ]
+
+    parsed: dict[str, object] = {
+        "intent": fields.get("INTENT", ""),
+        "confidence": fields.get("CONFIDENCE", "0.5"),
+        "conversation_act": fields.get("ACT", fields.get("CONVERSATION_ACT", "")),
+        "assistant_action": fields.get("ACTION", fields.get("ASSISTANT_ACTION", "")),
+        "language": fields.get("LANGUAGE", ""),
+        "sentiment": fields.get("SENTIMENT", ""),
+        "handoff_text": fields.get("HANDOFF_TEXT", ""),
+        "next_likely": next_likely,
+    }
+    return parsed
+
+
 # ── Result dataclass ───────────────────────────────────────────────────────
 
 @dataclass
@@ -202,6 +352,7 @@ class ClassificationResult:
     suggested_profile: str
     flow_name: Optional[str]
     required_slots: list[str]
+    handoff_text: str = ""
     suggested_actions: list[dict] = field(default_factory=list)
     next_likely: list[str] = field(default_factory=list)
 
@@ -219,9 +370,11 @@ def detect_clarification(message: str, last_bot_message: str) -> bool:
     if _CLARIFICATION_RE.search(msg):
         return True
 
-    # Very short message (≤6 words) referencing pronouns when there is prior context
+    # Very short message (≤6 words) referencing pronouns when there is prior context.
+    # Guard: "how to/do/can/would X" patterns are new questions, never clarifications.
     if last_bot_message and len(msg.split()) <= 6 and _SHORT_PRONOUN_RE.match(msg):
-        return True
+        if not _HOW_NEW_QUESTION_RE.match(msg):
+            return True
 
     # Single-word question like "huh?" "what?" with prior context
     if last_bot_message and len(msg.split()) <= 2 and msg.endswith("?"):
@@ -289,6 +442,7 @@ async def classify_intent(
             suggested_profile=intent_def.profile,
             flow_name=intent_def.flow_name,
             required_slots=intent_def.required_slots,
+            handoff_text=str(cached.get("handoff_text", "")),
             suggested_actions=intent_def.suggested_actions,
             next_likely=list(cached.get("next_likely", []))[:2],
         )
@@ -319,6 +473,7 @@ async def classify_intent(
             suggested_profile=intent_def.profile,
             flow_name=intent_def.flow_name,
             required_slots=intent_def.required_slots,
+            handoff_text="",
             suggested_actions=intent_def.suggested_actions,
         )
 
@@ -343,12 +498,13 @@ async def classify_intent(
             suggested_profile=intent_def.profile,
             flow_name=intent_def.flow_name,
             required_slots=intent_def.required_slots,
+            handoff_text="",
             suggested_actions=intent_def.suggested_actions,
             next_likely=[],
         )
 
     intent_list_lines = "\n".join(
-        f'- "{name}": {defn.description}'
+        f"{name}: {defn.description}"
         for name, defn in INTENTS.items()
     )
 
@@ -357,9 +513,9 @@ async def classify_intent(
         m for m in conversation_history
         if m.get("role") in ("user", "assistant") and m.get("content")
     ]
-    for m in eligible[-4:]:
+    for m in eligible[-2:]:
         role = m["role"].upper()
-        content = (m.get("content") or "")[:200]
+        content = (m.get("content") or "")[:120]
         recent_turns.append(f"{role}: {content}")
     recent_ctx = "\n".join(recent_turns) if recent_turns else "(no prior context)"
 
@@ -375,39 +531,31 @@ async def classify_intent(
 
     system_prompt = (
         "You are an intent and conversation-act classifier for a banking chatbot.\n"
-        "Respond ONLY with valid JSON — no explanation, no markdown fences.\n\n"
-        f"## Available intents\n{intent_list_lines}\n\n"
-        "## Conversation acts\n"
-        '- "normal_banking_query": User is asking a new or ongoing banking question.\n'
-        '- "conversation_complete": User signals satisfaction, is done, or has no more questions.\n'
-        '  Examples: "no that\'s all", "thanks bye", "ok I\'m done", "ধন্যবাদ আর লাগবে না", "thik ache done", "okay thanks"\n'
-        '- "flow_abort": User wants to cancel the current in-progress task or flow.\n'
-        '  Examples: "cancel", "never mind", "বাতিল করুন", "stop this", "forget it", "শুরু থেকে করি"\n'
-        '- "decline_current_suggestion": User declines the latest suggestion but still needs help.\n'
-        '  Examples: "no not that", "something else", "I don\'t want that option"\n'
-        '- "decline_escalation": User declines being connected to a human agent.\n'
-        '  Examples: "no agent", "no thanks I\'m fine here", "I\'ll manage"\n'
-        '- "acknowledgement_only": User just acknowledges, no new question.\n'
-        '  Examples: "ok", "I see", "got it", "ঠিক আছে", "acha"\n'
-        '- "clarification_request": User asks to re-explain or did not understand.\n'
-        '  Examples: "didn\'t understand", "what do you mean", "বুঝলাম না", "explain again", "simpler please"\n'
-        '- "complaint_or_frustration": User expresses anger, frustration, or dissatisfaction.\n'
-        '  Examples: "this is useless", "terrible service", "বিরক্ত হলাম", "not working again"\n\n'
-        "## assistant_action values (pick ONE)\n"
-        '- "close_conversation": user is satisfied/done — only when conversation_act is conversation_complete\n'
-        '- "abort_flow": user wants to cancel active task — only when conversation_act is flow_abort\n'
-        '- "re_explain": user wants clarification/simpler explanation\n'
-        '- "answer_with_rag": normal banking query needing knowledge lookup\n'
-        '- "offer_alternatives": user declined a suggestion but still needs help\n'
-        '- "escalate": user wants a human agent\n'
-        '- "resume_flow": continue active flow with this user input\n'
-        '- "continue_flow": continue normal conversation (no active flow, no specific act)\n\n'
-        "## Output format (JSON only)\n"
-        '{"intent": "<name from available intents>", "confidence": <0.0-1.0>, '
-        '"conversation_act": "<act>", "assistant_action": "<action>", '
-        '"language": "<en|bn|hinglish|other>", "sentiment": "<positive|neutral|negative>", '
-        '"next_likely": ["<intent_a>", "<intent_b>"]}\n'
-        'next_likely: 1-2 intent names the user is most likely to ask about next (exact names from the list; empty list if none).'
+        "Return ONLY structured output with no explanation and no markdown fences.\n"
+        "Use the tagged format below.\n\n"
+        "INTENTS:\n"
+        f"{intent_list_lines}\n\n"
+        "CONVERSATION_ACTS:\n"
+        "normal_banking_query, conversation_complete, flow_abort, decline_current_suggestion, "
+        "decline_escalation, acknowledgement_only, clarification_request, complaint_or_frustration\n\n"
+        "ASSISTANT_ACTIONS:\n"
+        "close_conversation, abort_flow, resume_flow, continue_flow, re_explain, "
+        "answer_with_rag, offer_alternatives, escalate, ask_clarification\n\n"
+        "CRITICAL RULE — close_conversation:\n"
+        "Use ACTION: close_conversation ONLY when the message is a pure farewell with "
+        "absolutely NO question, topic, or request for information (e.g. 'thanks', 'bye', "
+        "'that is all'). If the message contains ANY topic word, question, or intent to "
+        "learn something — no matter how brief — use answer_with_rag instead.\n\n"
+        "OUTPUT:\n"
+        "INTENT: <name from available intents>\n"
+        "CONFIDENCE: <0.0-1.0>\n"
+        "ACT: <conversation act>\n"
+        "ACTION: <assistant action>\n"
+        "LANGUAGE: <en|bn|hinglish|other>\n"
+        "SENTIMENT: <positive|neutral|negative>\n"
+        "NEXT_LIKELY: <intent_a>|<intent_b>\n\n"
+        "Leave NEXT_LIKELY empty if none.\n"
+        "Do not return any text before or after the structured output."
     )
     user_prompt = (
         f"Active flow: {active_flow_ctx}\n"
@@ -423,6 +571,7 @@ async def classify_intent(
     assistant_action = "answer_with_rag"
     language = "en"
     sentiment = "neutral"
+    handoff_text = ""
     next_likely: list[str] = []
 
     try:
@@ -438,6 +587,7 @@ async def classify_intent(
             ],
             "temperature": 0.0,
             "stream": False,
+            "max_tokens": 96,
         }
 
         is_ollama = (
@@ -450,10 +600,11 @@ async def classify_intent(
             kwargs["api_base"] = settings.ollama_base_url
             if not settings.llm_thinking:
                 kwargs["extra_body"] = {"think": False}
+        timeout_seconds = max(0.5, float(settings.classifier_timeout_ms) / 1000.0)
+        kwargs["timeout"] = timeout_seconds
 
         llm_start = time.perf_counter()
-        timeout_seconds = max(0.5, float(settings.classifier_timeout_ms) / 1000.0)
-        response = await asyncio.wait_for(acompletion(**kwargs), timeout=timeout_seconds)
+        response = await acompletion(**kwargs)
         llm_elapsed_ms = (time.perf_counter() - llm_start) * 1000
         raw = (response.choices[0].message.content or "").strip()
         logger.info(
@@ -464,9 +615,8 @@ async def classify_intent(
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("[classifier] raw_output=%r", raw[:500])
 
-        json_match = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
+        data = _parse_classifier_structured_output(raw)
+        if data:
             intent_name = str(data.get("intent", "general_faq"))
             confidence = float(data.get("confidence", 0.7))
             if intent_name not in INTENTS:
@@ -478,13 +628,15 @@ async def classify_intent(
             assistant_action = raw_action if raw_action in _VALID_ASSISTANT_ACTIONS else "answer_with_rag"
             language = str(data.get("language", "en"))
             sentiment = str(data.get("sentiment", "neutral"))
+            raw_handoff_text = data.get("handoff_text", "")
+            handoff_text = raw_handoff_text.strip() if isinstance(raw_handoff_text, str) else ""
             raw_next = data.get("next_likely", [])
             next_likely = [
                 n for n in (raw_next if isinstance(raw_next, list) else [])
                 if isinstance(n, str) and n in INTENTS
             ][:2]
         else:
-            logger.warning("[classifier] non_json_output | raw=%r", raw[:180])
+            logger.warning("[classifier] unparseable_output | raw=%r", raw[:180])
 
     except asyncio.TimeoutError:
         logger.warning(
@@ -502,6 +654,15 @@ async def classify_intent(
         assistant_action = "re_explain"
         confidence = max(confidence, 0.7)
         logger.info("[classifier] clarification_deterministic_fallback=true | action=re_explain")
+
+    # Guard against malformed first-turn outputs where the model marks a brand-new
+    # banking question as a clarification request with no prior context.
+    # When prior context exists, trust the LLM's classification — it understands
+    # any language/dialect (Banglish, Bengali, Arabic, etc.) better than regex.
+    if conversation_act == "clarification_request" and assistant_action != "re_explain":
+        if not last_bot_message:
+            conversation_act = "normal_banking_query"
+            logger.info("[classifier] clarification_act_normalized=true | reason=no_last_bot")
 
     # Confidence fallback: never silently end or abort on low-confidence signals
     if confidence < 0.75 and assistant_action in ("close_conversation", "abort_flow"):
@@ -530,6 +691,7 @@ async def classify_intent(
     should_abort_flow = conversation_act == "flow_abort" and assistant_action == "abort_flow"
     is_clarification = conversation_act == "clarification_request" or assistant_action == "re_explain"
     reply_style = _REPLY_STYLE_MAP.get(assistant_action, "rag_answer")
+    handoff_text = handoff_text or _default_handoff_text(assistant_action, intent_name, language)
 
     intent_def = INTENTS.get(intent_name, FALLBACK_INTENT)
     is_negative = detect_negative_sentiment(message)
@@ -567,6 +729,7 @@ async def classify_intent(
         suggested_profile=intent_def.profile,
         flow_name=intent_def.flow_name,
         required_slots=intent_def.required_slots,
+        handoff_text=handoff_text,
         suggested_actions=intent_def.suggested_actions,
         next_likely=next_likely,
     )
@@ -585,6 +748,7 @@ async def classify_intent(
             "is_clarification": result.is_clarification,
             "is_abort": result.is_abort,
             "is_negative_sentiment": result.is_negative_sentiment,
+            "handoff_text": result.handoff_text,
             "next_likely": result.next_likely,
         },
     )

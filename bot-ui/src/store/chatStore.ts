@@ -150,6 +150,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       messages: state.messages.filter((m) => m.id !== THINKING_ID),
     })),
 
+  updateThinkingLabel: (label: string) =>
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === THINKING_ID && m.type === "thinking"
+          ? ({ ...m, label } as ThinkingMessage)
+          : m
+      ),
+    })),
+
   setConnectionStatus: (status: ConnectionStatus) =>
     set({ connectionStatus: status }),
 

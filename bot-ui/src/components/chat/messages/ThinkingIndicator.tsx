@@ -2,7 +2,11 @@
 
 import { Shield } from "lucide-react";
 
-export function ThinkingIndicator() {
+interface Props {
+  label?: string;
+}
+
+export function ThinkingIndicator({ label }: Props) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-1.5">
       <div className="w-8 h-8 rounded-full bg-[#1A56DB] flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm">
@@ -10,10 +14,20 @@ export function ThinkingIndicator() {
       </div>
 
       <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3.5 shadow-sm">
-        <div className="flex items-center gap-1.5">
-          <span className="thinking-dot w-2 h-2 rounded-full bg-[#1A56DB] inline-block opacity-40" />
-          <span className="thinking-dot w-2 h-2 rounded-full bg-[#1A56DB] inline-block opacity-40" />
-          <span className="thinking-dot w-2 h-2 rounded-full bg-[#1A56DB] inline-block opacity-40" />
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            <span className="thinking-dot w-2 h-2 rounded-full bg-[#1A56DB] inline-block opacity-40" />
+            <span className="thinking-dot w-2 h-2 rounded-full bg-[#1A56DB] inline-block opacity-40" />
+            <span className="thinking-dot w-2 h-2 rounded-full bg-[#1A56DB] inline-block opacity-40" />
+          </div>
+          {label && (
+            <span
+              key={label}
+              className="text-xs text-gray-400 ml-1 animate-pulse"
+            >
+              {label}
+            </span>
+          )}
         </div>
       </div>
     </div>
