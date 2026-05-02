@@ -3,8 +3,8 @@
 import { forwardRef, useImperativeHandle, useEffect, useRef } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
+import { ResizableImage } from "@/lib/resizable-image";
 import Table from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
 import TableCell from "@tiptap/extension-table-cell";
@@ -32,7 +32,7 @@ export const EditorPane = forwardRef<EditorPaneRef, EditorPaneProps>(
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5, 6] },
         }),
-        Image.configure({ inline: false, allowBase64: false }),
+        ResizableImage.configure({ inline: false, allowBase64: false }),
         Link.configure({ openOnClick: false, autolink: true }),
         Table.configure({ resizable: false }),
         TableRow,

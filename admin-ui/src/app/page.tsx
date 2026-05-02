@@ -48,6 +48,7 @@ export default function EditorPage() {
   const [listStatus, setListStatus]   = useState<(typeof LIST_STATUS_FILTERS)[number]>("all");
   const [isDocPanelOpen, setIsDocPanelOpen] = useState(false);
   const [mobilePane, setMobilePane]   = useState<"editor" | "preview">("editor");
+  const [metaOpen, setMetaOpen]       = useState(true);
 
   const editorRef = useRef<EditorPaneRef>(null);
   const relevanceInput = meta.relevance_score == null ? "" : String(meta.relevance_score);
@@ -238,8 +239,8 @@ export default function EditorPage() {
       <Toaster position="top-right" />
 
       {/* ── Top tab bar ── */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-4 py-2">
-        <span className="mr-2 text-sm font-semibold uppercase tracking-widest text-slate-400">
+      <div className="flex shrink-0 items-center gap-2 border-b border-blue-950 bg-blue-950 px-4 py-2">
+        <span className="mr-3 text-sm font-bold uppercase tracking-widest text-blue-400">
           Admin
         </span>
         <button
@@ -247,8 +248,8 @@ export default function EditorPage() {
           onClick={() => setActiveTab("kb")}
           className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
             activeTab === "kb"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-600 hover:bg-slate-100"
+              ? "bg-blue-500 text-white shadow-sm"
+              : "text-blue-200 hover:bg-blue-800 hover:text-white"
           }`}
         >
           Knowledge Base
@@ -258,8 +259,8 @@ export default function EditorPage() {
           onClick={() => setActiveTab("flows")}
           className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
             activeTab === "flows"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-600 hover:bg-slate-100"
+              ? "bg-blue-500 text-white shadow-sm"
+              : "text-blue-200 hover:bg-blue-800 hover:text-white"
           }`}
         >
           Flows
@@ -330,7 +331,7 @@ export default function EditorPage() {
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:opacity-60"
+              className="inline-flex items-center rounded-lg bg-blue-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-800 disabled:opacity-60"
             >
               {isSaving ? "Saving..." : selectedId ? "Save" : "Create"}
             </button>
@@ -379,132 +380,129 @@ export default function EditorPage() {
           </div>
         </header>
 
-        <section className="border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-5">
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <input
-              type="text"
-              value={meta.title}
-              onChange={(e) => { setMeta((m) => ({ ...m, title: e.target.value })); setIsDirty(true); }}
-              placeholder="Document title"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 xl:col-span-2"
-            />
-            <select
-              value={meta.category}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, category: e.target.value }));
-                setIsDirty(true);
-              }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
-              ))}
-            </select>
-            <input
-              type="text"
-              value={meta.subcategory}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, subcategory: e.target.value }));
-                setIsDirty(true);
-              }}
-              placeholder="Subcategory"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-
-            <select
-              value={meta.document_type}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, document_type: e.target.value }));
-                setIsDirty(true);
-              }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {DOC_TYPES.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-            <select
-              value={meta.language}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, language: e.target.value }));
-                setIsDirty(true);
-              }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {LANGUAGES.map((l) => (
-                <option key={l} value={l}>{l}</option>
-              ))}
-            </select>
-            <input
-              type="text"
-              value={meta.author}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, author: e.target.value }));
-                setIsDirty(true);
-              }}
-              placeholder="Author"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <input
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              value={relevanceInput}
-              onChange={(e) => {
-                const nextValue = e.target.value;
-                setMeta((m) => ({
-                  ...m,
-                  relevance_score: nextValue === "" ? null : Number(nextValue),
-                }));
-                setIsDirty(true);
-              }}
-              placeholder="Relevance"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-
-            <input
-              type="text"
-              value={tagsInput}
-              onChange={(e) => { setTagsInput(e.target.value); setIsDirty(true); }}
-              placeholder="Intent tags (comma separated)"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 xl:col-span-2"
-            />
-            <input
-              type="url"
-              value={meta.source_url}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, source_url: e.target.value }));
-                setIsDirty(true);
-              }}
-              placeholder="Source URL"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 xl:col-span-2"
-            />
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
-            <label className="flex items-center gap-1.5 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={meta.is_published}
-              onChange={(e) => {
-                setMeta((m) => ({ ...m, is_published: e.target.checked }));
-                setIsDirty(true);
-              }}
-              className="rounded"
-            />
-            Published
-          </label>
-
-          {isDirty && (
-            <span className="text-xs font-medium text-amber-500">● Unsaved</span>
-          )}
-          {selectedId && (
-            <span className="max-w-[160px] truncate font-mono text-[10px] text-slate-400" title={selectedId}>
-              {selectedId.slice(0, 8)}…
+        <section className="border-b border-slate-200 bg-slate-50">
+          {/* ── Collapsible toggle header ── */}
+          <button
+            type="button"
+            onClick={() => setMetaOpen((o) => !o)}
+            className="flex w-full items-center justify-between bg-blue-950 px-4 py-2 sm:px-5 text-xs font-semibold uppercase tracking-wider text-blue-200 hover:bg-blue-900 transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              <svg className="h-3.5 w-3.5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Document Metadata
+              {isDirty && <span className="ml-1 text-amber-400">● Unsaved</span>}
             </span>
+            <svg
+              className={`h-4 w-4 text-blue-300 transition-transform duration-200 ${metaOpen ? "rotate-180" : ""}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {metaOpen && (
+            <div className="px-4 py-3 sm:px-5">
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <input
+                  type="text"
+                  value={meta.title}
+                  onChange={(e) => { setMeta((m) => ({ ...m, title: e.target.value })); setIsDirty(true); }}
+                  placeholder="Document title"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 xl:col-span-2"
+                />
+                <select
+                  value={meta.category}
+                  onChange={(e) => { setMeta((m) => ({ ...m, category: e.target.value })); setIsDirty(true); }}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={meta.subcategory}
+                  onChange={(e) => { setMeta((m) => ({ ...m, subcategory: e.target.value })); setIsDirty(true); }}
+                  placeholder="Subcategory"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+
+                <select
+                  value={meta.document_type}
+                  onChange={(e) => { setMeta((m) => ({ ...m, document_type: e.target.value })); setIsDirty(true); }}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {DOC_TYPES.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+                <select
+                  value={meta.language}
+                  onChange={(e) => { setMeta((m) => ({ ...m, language: e.target.value })); setIsDirty(true); }}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {LANGUAGES.map((l) => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={meta.author}
+                  onChange={(e) => { setMeta((m) => ({ ...m, author: e.target.value })); setIsDirty(true); }}
+                  placeholder="Author"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={relevanceInput}
+                  onChange={(e) => {
+                    const nextValue = e.target.value;
+                    setMeta((m) => ({ ...m, relevance_score: nextValue === "" ? null : Number(nextValue) }));
+                    setIsDirty(true);
+                  }}
+                  placeholder="Relevance"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+
+                <input
+                  type="text"
+                  value={tagsInput}
+                  onChange={(e) => { setTagsInput(e.target.value); setIsDirty(true); }}
+                  placeholder="Intent tags (comma separated)"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 xl:col-span-2"
+                />
+                <input
+                  type="url"
+                  value={meta.source_url}
+                  onChange={(e) => { setMeta((m) => ({ ...m, source_url: e.target.value })); setIsDirty(true); }}
+                  placeholder="Source URL"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 xl:col-span-2"
+                />
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={meta.is_published}
+                    onChange={(e) => { setMeta((m) => ({ ...m, is_published: e.target.checked })); setIsDirty(true); }}
+                    className="rounded"
+                  />
+                  Published
+                </label>
+                {selectedId && (
+                  <span className="max-w-[160px] truncate font-mono text-[10px] text-slate-400" title={selectedId}>
+                    {selectedId.slice(0, 8)}…
+                  </span>
+                )}
+              </div>
+            </div>
           )}
-          </div>
         </section>
 
         <div className="border-b border-slate-200 bg-white px-4 py-2 lg:hidden">

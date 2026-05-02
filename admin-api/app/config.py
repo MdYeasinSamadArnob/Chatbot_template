@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # ── Admin ───────────────────────────────────────────────────────────
     admin_secret: str = ""
 
+    # ── File uploads ─────────────────────────────────────────────────────
+    # Directory where uploaded images are stored (relative to CWD or absolute).
+    # WARNING: files served from this directory are publicly accessible by URL.
+    # Do not store sensitive files here.
+    uploads_dir: str = "./uploads"
+    upload_max_mb: int = 5
+
     # ── LLM thinking mode (Qwen3 / extended-reasoning models) ───────────
     # Set to False to disable chain-of-thought / thinking tokens.
     llm_thinking: bool = False

@@ -16,12 +16,15 @@ Startup order:
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.kb import router as kb_router
 from app.api.flows import router as flows_router
+from app.api.upload import router as upload_router
 from app.config import settings
 
 logging.basicConfig(
@@ -51,6 +54,7 @@ _fastapi_app.add_middleware(
 
 _fastapi_app.include_router(kb_router)
 _fastapi_app.include_router(flows_router)
+_fastapi_app.include_router(upload_router)
 
 
 @_fastapi_app.on_event("startup")
@@ -60,6 +64,14 @@ async def on_startup() -> None:
         await init_db()
     except Exception as exc:
         logger.warning("DB init failed (postgres may not be ready yet): %s", exc)
+
+    # Ensure uploads directory exists and mount static files
+    os.makedirs(settings.uploads_dir, exist_ok=True)
+    _fastapi_app.mount(
+        "/uploads",
+        StaticFiles(directory=settings.uploads_dir),
+        name="uploads",
+    )
 
     logger.info("Admin API starting. Model=%s", settings.model_name)
 

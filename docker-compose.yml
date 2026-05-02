@@ -83,6 +83,7 @@ services:
       - PORT=9002
     volumes:
       - admin_api_memory:/app/memory_store
+      - admin_api_uploads:/app/uploads
     depends_on:
       - ollama
       - postgres
@@ -110,4 +111,5 @@ volumes:
   ollama_models:
   bot_socket_memory:
   admin_api_memory:
+  admin_api_uploads:
   postgres_data:
