@@ -107,3 +107,17 @@ class EscalationTicket(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+
+class FlowDefinition(Base):
+    """DB-editable overrides for guided conversational flows."""
+    __tablename__ = "flow_definitions"
+
+    flow_key = Column(String(128), primary_key=True)
+    intent = Column(String(128), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    intro_text = Column(Text, nullable=True)
+    abort_confirmation = Column(Text, nullable=True)
+    completion_text_template = Column(Text, nullable=True)
+    steps_json = Column(JSON, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+

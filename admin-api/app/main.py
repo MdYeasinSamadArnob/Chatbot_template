@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.kb import router as kb_router
+from app.api.flows import router as flows_router
 from app.config import settings
 
 logging.basicConfig(
@@ -49,6 +50,7 @@ _fastapi_app.add_middleware(
 )
 
 _fastapi_app.include_router(kb_router)
+_fastapi_app.include_router(flows_router)
 
 
 @_fastapi_app.on_event("startup")

@@ -89,6 +89,16 @@ class Settings(BaseSettings):
     kb_prefetch_timeout_ms_degraded: int = 400
     disable_kb_tool_when_embedding_down: bool = True
 
+    # Number of KB chunks fetched during the parallel pre-fetch (runs before the
+    # agent loop). Higher = more recall for broad queries ("transfer money");
+    # lower = faster. Keep at 6 unless latency is a concern.
+    kb_prefetch_top_k: int = 6
+
+    # When True, completed guided-flow responses are grounded in KB articles
+    # via a focused LLM call instead of returning the static template string.
+    # Set to False to revert to the old template-only behaviour.
+    flow_kb_augment: bool = True
+
     # ── Embedding backend circuit breaker ────────────────────────────────
     embedding_breaker_failure_threshold: int = 3
     embedding_breaker_cooldown_seconds: int = 45

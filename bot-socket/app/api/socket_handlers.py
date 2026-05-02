@@ -40,7 +40,7 @@ from typing import Any
 
 import socketio
 
-from app.agent.core import run_agent_loop_with_emitter, run_reexplain_loop_with_emitter
+from app.agent.core import run_agent_loop_with_emitter, run_reexplain_loop_with_emitter, _visible_sources
 from app.agent.memory import clear_memory, get_or_create_memory
 from app.agent.profiles import list_profiles
 from app.config import settings
@@ -943,7 +943,7 @@ async def _prefetch_kb(query: str) -> tuple[str, float, list]:
             VectorSearchInput,
             embedding_backend_degraded,
         )
-        result = await search_banking_knowledge(VectorSearchInput(query=query, top_k=3))
+        result = await search_banking_knowledge(VectorSearchInput(query=query, top_k=settings.kb_prefetch_top_k))
         context_text, confidence, sources = _extract_kb_prefetch_payload(result)
         # If the embedding model was unavailable during this prefetch, the search
         # used sparse BM25 only.  BM25 matches on keywords ("account", "money")
@@ -1714,14 +1714,103 @@ async def _handle_flow(
         return
 
     if result.is_complete and result.completion_context:
-        # Flow done — emit the completion response directly (no LLM needed)
-        await emit_fn("text_delta", {"delta": result.completion_context})
+        # Capture flow name before it's cleared from session state
+        active_flow_name = engine.flow.name
+
+        # ─ Build a KB search query from the flow topic only (not slot values) ────
+        def _build_flow_kb_query(fname: str, flow_intent: str | None) -> str:
+            """Return a clean topic query for KB lookup — no user slot values."""
+            label_map = {
+                "download_statement": "how to download bank account statement",
+                "fund_transfer": "how to transfer money bank account",
+                "account_opening": "how to open a new bank account",
+                "card_services": "credit debit card services",
+            }
+            base = label_map.get(fname, fname.replace("_", " "))
+            if flow_intent and flow_intent.replace("_", " ") not in base:
+                base = flow_intent.replace("_", " ") + " " + base
+            return base.strip()
+
+        completion_text = result.completion_context
+
+        if settings.flow_kb_augment:
+            try:
+                from app.tools.vector_search import search_banking_knowledge, VectorSearchInput
+                from app.agent.core import run_flow_completion_with_emitter
+
+                flow_intent = getattr(engine.flow, "intent", None)
+                _fq = _build_flow_kb_query(active_flow_name, flow_intent)
+                # Restrict search to chunks tagged with this flow's intent
+                # so we get the right document, not generic procedure docs.
+                _intent_filter = [active_flow_name]
+                if flow_intent and flow_intent != active_flow_name:
+                    _intent_filter.append(flow_intent)
+                _kb_raw = await search_banking_knowledge(
+                    VectorSearchInput(
+                        query=_fq,
+                        top_k=3,
+                        intent_tags=_intent_filter,
+                    )
+                )
+                _kb_ctx, _kb_conf, _kb_sources = _extract_kb_prefetch_payload(_kb_raw)
+
+                # Fall back to broad search if intent-filtered search returns nothing
+                if not _kb_ctx:
+                    _kb_raw = await search_banking_knowledge(VectorSearchInput(query=_fq, top_k=3))
+                    _kb_ctx, _kb_conf, _kb_sources = _extract_kb_prefetch_payload(_kb_raw)
+
+                if _kb_ctx:
+                    logger.info(
+                        "[%s] flow_completion: KB-augment active (conf=%.2f sources=%d query=%r)",
+                        conversation_id, _kb_conf, len(_kb_sources), _fq[:80],
+                    )
+                    # Show only the single best-matching source (highest reranker_score)
+                    # from procedure+active docs, deduped by title. This avoids showing
+                    # unrelated chunks that happen to share the same document_type.
+                    _proc_sources = _visible_sources(_kb_sources)
+                    if _proc_sources:
+                        # Sort by reranker_score descending, take best per unique title
+                        _proc_sources.sort(key=lambda s: s.get("reranker_score", 0.0), reverse=True)
+                        _seen_titles: set[str] = set()
+                        _flow_sources = []
+                        for _s in _proc_sources:
+                            _t = _s.get("document_title", "")
+                            if _t not in _seen_titles:
+                                _seen_titles.add(_t)
+                                _flow_sources.append(_s)
+                                if len(_flow_sources) >= 1:  # only the top source
+                                    break
+                        if _flow_sources:
+                            await emit_fn("sources", {"sources": _flow_sources})
+
+                    completion_text = await run_flow_completion_with_emitter(
+                        flow_name=active_flow_name,
+                        collected_slots=result.collected_slots,
+                        kb_context=_kb_ctx,
+                        fallback_text=result.completion_context,
+                        conversation_id=conversation_id,
+                        memory=memory,
+                        emit_fn=emit_fn,
+                        bank_name=settings.bank_name,
+                    )
+                else:
+                    logger.info(
+                        "[%s] flow_completion: no KB results — using template",
+                        conversation_id,
+                    )
+                    await emit_fn("text_delta", {"delta": completion_text})
+            except Exception as _fkb_exc:
+                logger.warning("[%s] flow KB augment failed: %s — using template", conversation_id, _fkb_exc)
+                await emit_fn("text_delta", {"delta": completion_text})
+        else:
+            await emit_fn("text_delta", {"delta": completion_text})
+
         state_update = memory.get_state()
         state_update.pop("suggested_actions", None)
         memory.replace_state(state_update)
         await emit_fn("state", {k: v for k, v in memory.get_state().items() if k != "suggested_actions"})
         await emit_fn("finish", {"finishReason": "stop", "usage": {"promptTokens": 0, "completionTokens": 0}, "suggestedActions": []})
-        memory.add_assistant_message(content=result.completion_context)
+        memory.add_assistant_message(content=completion_text)
         return
 
     # Next flow step — emit question + quick replies

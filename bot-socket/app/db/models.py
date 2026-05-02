@@ -111,3 +111,29 @@ class EscalationTicket(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+
+class FlowDefinition(Base):
+    """
+    DB-editable overrides for guided conversational flows.
+
+    The Python code in flow_definitions.py holds the canonical extractors /
+    validators.  Rows in this table override only the *text* fields (intro,
+    abort confirmation, step prompts, quick replies, completion template) so
+    operators can update wording via the admin UI without a code deploy.
+
+    A NULL value for any text field means "use the hardcoded Python default".
+    """
+    __tablename__ = "flow_definitions"
+
+    flow_key = Column(String(128), primary_key=True)          # e.g. "download_statement"
+    intent = Column(String(128), nullable=True)                # intent tag (informational)
+    is_active = Column(Boolean, default=True, nullable=False)  # False = flow disabled
+    intro_text = Column(Text, nullable=True)                   # NULL = use Python default
+    abort_confirmation = Column(Text, nullable=True)
+    completion_text_template = Column(Text, nullable=True)
+    # JSON array of step overrides: [{"slot": "date_range", "prompt_text": "...",
+    #   "quick_replies": [{"label": "...", "value": "..."}]}]
+    # NULL = use Python defaults for all steps
+    steps_json = Column(JSON, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+

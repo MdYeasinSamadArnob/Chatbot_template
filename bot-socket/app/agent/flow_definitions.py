@@ -177,3 +177,46 @@ FLOWS: dict[str, ConversationalFlow] = {
 
 def get_flow(flow_name: str) -> Optional[ConversationalFlow]:
     return FLOWS.get(flow_name)
+
+
+def apply_db_overrides(db_rows: list) -> None:
+    """
+    Merge DB-stored text overrides onto the in-memory FLOWS registry.
+
+    Called at startup (and on reload) with a list of FlowDefinition ORM rows.
+    Only non-None DB values overwrite the Python defaults; omitted fields are
+    left untouched so a partial DB row still works.
+
+    Preserves all Python extractor / validator functions — only text and
+    quick_replies are overridable via the DB / admin UI.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    for row in db_rows:
+        flow = FLOWS.get(row.flow_key)
+        if flow is None:
+            log.debug("apply_db_overrides: unknown flow_key %r — skipped", row.flow_key)
+            continue
+
+        if row.intro_text is not None:
+            flow.intro_text = row.intro_text
+        if row.abort_confirmation is not None:
+            flow.abort_confirmation = row.abort_confirmation
+        if row.completion_text_template is not None:
+            flow.completion_text_template = row.completion_text_template
+
+        # Per-step overrides: [{"slot": "date_range", "prompt_text": "...",
+        #                       "quick_replies": [{"label": ..., "value": ...}]}]
+        if row.steps_json:
+            step_map = {s.slot: s for s in flow.steps}
+            for step_override in row.steps_json:
+                slot = step_override.get("slot")
+                if slot and slot in step_map:
+                    step = step_map[slot]
+                    if step_override.get("prompt_text") is not None:
+                        step.prompt_text = step_override["prompt_text"]
+                    if step_override.get("quick_replies") is not None:
+                        step.quick_replies = step_override["quick_replies"]
+
+        log.info("apply_db_overrides: applied overrides for flow %r", row.flow_key)

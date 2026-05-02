@@ -7,6 +7,7 @@ import { htmlToRenderBlocks, contentToHtml } from "@/lib/html-utils";
 import { HistorySidebar } from "@/components/HistorySidebar";
 import { PreviewPane } from "@/components/PreviewPane";
 import { EditorPane, type EditorPaneRef } from "@/components/EditorPane";
+import { FlowsPanel } from "@/components/FlowsPanel";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ const LIST_STATUS_FILTERS = ["all", "published", "draft", "pending", "processing
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function EditorPage() {
+  const [activeTab, setActiveTab] = useState<"kb" | "flows">("kb");
   const [documents, setDocuments]     = useState<KBDocument[]>([]);
   const [selectedId, setSelectedId]   = useState<string | null>(null);
   const [meta, setMeta]               = useState<DocumentMetadata>({ ...EMPTY_META });
@@ -232,8 +234,45 @@ export default function EditorPage() {
   // ── Render ─────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-100">
+    <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
       <Toaster position="top-right" />
+
+      {/* ── Top tab bar ── */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-4 py-2">
+        <span className="mr-2 text-sm font-semibold uppercase tracking-widest text-slate-400">
+          Admin
+        </span>
+        <button
+          type="button"
+          onClick={() => setActiveTab("kb")}
+          className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+            activeTab === "kb"
+              ? "bg-blue-600 text-white shadow-sm"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          Knowledge Base
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("flows")}
+          className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+            activeTab === "flows"
+              ? "bg-blue-600 text-white shadow-sm"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          Flows
+        </button>
+      </div>
+
+      {/* ── Flows panel ── */}
+      {activeTab === "flows" && <FlowsPanel />}
+
+      {/* ── KB panel (hidden but mounted when on flows tab so state is preserved) ── */}
+      <div className={`flex min-h-0 flex-1 overflow-hidden ${
+        activeTab === "kb" ? "" : "hidden"
+      }`}>
 
       {isDocPanelOpen && (
         <div className="fixed inset-0 z-40 bg-slate-950/50 lg:hidden" onClick={() => setIsDocPanelOpen(false)}>
@@ -514,6 +553,7 @@ export default function EditorPage() {
           </div>
         </div>
       </div>
+      </div>  {/* end KB panel wrapper */}
     </div>
   );
 }

@@ -7,7 +7,15 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-engine = create_async_engine(settings.postgres_url, echo=False, future=True)
+# Pre-ping pooled connections so long-lived app processes don't reuse
+# asyncpg connections that the database has already closed.
+engine = create_async_engine(
+    settings.postgres_url,
+    echo=False,
+    future=True,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def get_db():

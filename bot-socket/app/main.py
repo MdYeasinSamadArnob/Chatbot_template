@@ -59,6 +59,18 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Redis init error (non-fatal): %s", exc)
 
+    # Load flow text overrides from DB (best-effort — Python defaults used if this fails)
+    try:
+        from app.db.connection import AsyncSessionLocal
+        from app.db.repositories import get_all_flow_definitions
+        from app.agent.flow_definitions import apply_db_overrides
+        async with AsyncSessionLocal() as _sess:
+            _rows = await get_all_flow_definitions(_sess)
+        apply_db_overrides(_rows)
+        logger.info("Flow DB overrides loaded: %d row(s)", len(_rows))
+    except Exception as exc:
+        logger.warning("Flow DB override load failed (non-fatal): %s", exc)
+
     from app.tools.registry import registry
     logger.info(
         "Bot Socket API starting. Model=%s  Tools=%s",
@@ -88,6 +100,34 @@ _fastapi_app.add_middleware(
 )
 
 _fastapi_app.include_router(chat_router)
+
+
+# ── Admin endpoints ──────────────────────────────────────────────────────────────
+
+from fastapi import Header, HTTPException
+
+
+@_fastapi_app.post("/admin/reload-flows", tags=["admin"])
+async def reload_flows(x_admin_secret: str = Header(default="")) -> dict:
+    """
+    Reload flow text overrides from the DB into the in-memory FLOWS registry.
+    Called by the admin UI after saving a flow definition.
+    Requires the x-admin-secret header.
+    """
+    if settings.admin_secret and x_admin_secret != settings.admin_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        from app.db.connection import AsyncSessionLocal
+        from app.db.repositories import get_all_flow_definitions
+        from app.agent.flow_definitions import apply_db_overrides
+        async with AsyncSessionLocal() as _sess:
+            _rows = await get_all_flow_definitions(_sess)
+        apply_db_overrides(_rows)
+        logger.info("[reload-flows] Applied %d DB override(s)", len(_rows))
+        return {"status": "ok", "rows_applied": len(_rows)}
+    except Exception as exc:
+        logger.error("[reload-flows] failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Wrap with Socket.IO ASGI ───────────────────────────────────────────────

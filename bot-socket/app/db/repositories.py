@@ -1,5 +1,5 @@
 # DB repository functions for conversations, messages, session state, escalations
-from .models import Conversation, Message, SessionState, EscalationTicket, BankingKnowledge, KnowledgeDocument
+from .models import Conversation, Message, SessionState, EscalationTicket, BankingKnowledge, KnowledgeDocument, FlowDefinition
 from sqlalchemy.future import select
 from sqlalchemy import delete, func as sqlfunc
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -521,3 +521,35 @@ async def kb_get_stats(session: AsyncSession) -> Dict[str, int]:
         "categories": cats_r.scalar_one(),
     }
 
+
+# ── Flow definition helpers ────────────────────────────────────────────────────
+
+async def get_all_flow_definitions(session: AsyncSession) -> List[FlowDefinition]:
+    """Return all rows from flow_definitions ordered by flow_key."""
+    result = await session.execute(
+        select(FlowDefinition).order_by(FlowDefinition.flow_key)
+    )
+    return list(result.scalars().all())
+
+
+async def upsert_flow_definition(
+    session: AsyncSession,
+    flow_key: str,
+    data: Dict[str, Any],
+) -> FlowDefinition:
+    """
+    Insert or update a flow_definitions row.
+    Only keys present in ``data`` are written; omitted keys are left unchanged.
+    """
+    result = await session.execute(
+        select(FlowDefinition).where(FlowDefinition.flow_key == flow_key)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = FlowDefinition(flow_key=flow_key)
+        session.add(row)
+    for key, value in data.items():
+        setattr(row, key, value)
+    await session.commit()
+    await session.refresh(row)
+    return row

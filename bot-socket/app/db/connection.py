@@ -7,7 +7,15 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-engine = create_async_engine(settings.postgres_url, echo=False, future=True)
+# Pre-ping pooled connections so long-lived app processes don't reuse
+# asyncpg connections that the database has already closed.
+engine = create_async_engine(
+    settings.postgres_url,
+    echo=False,
+    future=True,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def get_db():
@@ -96,5 +104,23 @@ async def init_db() -> None:
             logger.info("Index ready: %s", name)
         except Exception as exc:
             logger.warning("Index %s failed: %s", name, exc)
+
+    # flow_definitions table — idempotent explicit CREATE for forward compatibility
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS flow_definitions (
+                    flow_key                 VARCHAR(128) PRIMARY KEY,
+                    intent                   VARCHAR(128),
+                    is_active                BOOLEAN NOT NULL DEFAULT TRUE,
+                    intro_text               TEXT,
+                    abort_confirmation       TEXT,
+                    completion_text_template TEXT,
+                    steps_json               JSONB,
+                    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+    except Exception as exc:
+        logger.warning("flow_definitions table migration failed: %s", exc)
 
     logger.info("Database tables and indexes initialised.")

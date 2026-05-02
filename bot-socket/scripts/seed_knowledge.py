@@ -3,8 +3,8 @@
 Seed the banking knowledge base from a JSON file.
 
 Usage:
-    python scripts/seed_knowledge.py --file data/banking_knowledge.json
-    python scripts/seed_knowledge.py --file data/banking_knowledge.json --dry-run
+    python scripts/seed_knowledge.py --file /path/to/your_articles.json
+    python scripts/seed_knowledge.py --file /path/to/your_articles.json --dry-run
 
 JSON format:
     [
@@ -19,6 +19,9 @@ JSON format:
       },
       ...
     ]
+
+Note: KB documents are managed through the Admin UI (localhost:3002).
+      This script is only needed for bulk initial imports from a JSON export.
 """
 from __future__ import annotations
 

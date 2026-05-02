@@ -378,15 +378,58 @@ async def _stream_llm_with_emitter(
     _LOOKAHEAD = 40
     pending_buf: str = ""
     leak_stopped: bool = False
+    # ── <think>...</think> streaming filter (Qwen3 / reasoning models) ────
+    # When think:False is ignored by the model, strip thinking blocks so they
+    # never reach the UI as text_delta events.
+    # Only holds back chars that are literally a partial prefix of a tag (e.g.
+    # just "<" or "<t") so normal words are never fragmented.
+    _THINK_OPEN = "<think>"
+    _THINK_CLOSE = "</think>"
+    _in_think: bool = False
+    _think_partial: str = ""  # buffered partial tag prefix from previous token
+
+    def _filter_think(raw: str) -> str:
+        nonlocal _in_think, _think_partial
+        buf = _think_partial + raw
+        _think_partial = ""
+        result = ""
+        while buf:
+            if _in_think:
+                idx = buf.find(_THINK_CLOSE)
+                if idx == -1:
+                    # Hold back only a genuine partial </think> suffix
+                    for i in range(min(len(buf), len(_THINK_CLOSE) - 1), 0, -1):
+                        if _THINK_CLOSE.startswith(buf[-i:]):
+                            _think_partial = buf[-i:]
+                            return result
+                    return result  # discard all thinking content
+                buf = buf[idx + len(_THINK_CLOSE):]
+                _in_think = False
+            else:
+                idx = buf.find(_THINK_OPEN)
+                if idx == -1:
+                    # Hold back only a genuine partial <think> prefix at end
+                    for i in range(min(len(buf), len(_THINK_OPEN) - 1), 0, -1):
+                        if _THINK_OPEN.startswith(buf[-i:]):
+                            result += buf[:-i]
+                            _think_partial = buf[-i:]
+                            return result
+                    result += buf
+                    return result
+                result += buf[:idx]
+                buf = buf[idx + len(_THINK_OPEN):]
+                _in_think = True
+        return result
 
     response = await acompletion(**kwargs)
     async for chunk in response:
         choice = chunk.choices[0]
         delta = choice.delta
 
-        # ── Text chunk: buffer → detect transcript leak → emit safe prefix ──
+        # ── Text chunk: filter think tags → detect transcript leak → emit ──
         if delta.content and not leak_stopped:
-            token = _strip_tool_artifacts(delta.content)
+            filtered = _filter_think(delta.content)
+            token = _strip_tool_artifacts(filtered) if filtered else ""
             if token:
                 pending_buf += token
                 leak = _TRANSCRIPT_LEAK_RE.search(pending_buf)
@@ -441,6 +484,11 @@ async def _stream_llm_with_emitter(
             usage["prompt_tokens"] = getattr(chunk_usage, "prompt_tokens", 0) or 0
             usage["completion_tokens"] = getattr(chunk_usage, "completion_tokens", 0) or 0
 
+    # ── Flush think partial (stream ended before a full tag — treat as plain text) ──
+    if _think_partial and not _in_think:
+        extra = _strip_tool_artifacts(_think_partial)
+        if extra:
+            pending_buf += extra
     # ── Flush remaining lookahead buffer ──────────────────────────────
     if pending_buf and not leak_stopped:
         leak = _TRANSCRIPT_LEAK_RE.search(pending_buf)
@@ -1237,3 +1285,84 @@ async def run_reexplain_loop_with_emitter(
         },
         "suggestedActions": suggested_actions or [],
     })
+
+
+# ── Flow completion with KB grounding (Socket.IO) ─────────────────────────────
+
+async def run_flow_completion_with_emitter(
+    flow_name: str,
+    collected_slots: dict[str, Any],
+    kb_context: str,
+    fallback_text: str,
+    conversation_id: str,
+    memory: AgentMemory,
+    emit_fn: Callable[[str, Any], Awaitable[None]],
+    bank_name: str = "the bank",
+) -> str:
+    """
+    Generate a KB-grounded flow completion response via a single streaming LLM call.
+
+    Uses the collected slot values and retrieved KB article as context so the
+    response reflects the actual procedure in the knowledge base rather than a
+    hardcoded template.  Returns the full answer text (for memory persistence).
+    If the LLM call fails, falls back to ``fallback_text``.
+    """
+    # Format slot values: replace underscores and title-case both key and value
+    def _fmt_slot_value(v: str) -> str:
+        return str(v).replace("_", " ").strip().title()
+
+    slot_lines = "\n".join(
+        f"- {k.replace('_', ' ').title()}: {_fmt_slot_value(str(v))}"
+        for k, v in collected_slots.items()
+    )
+    user_ctx = memory.get_user_context()
+    first_name = (user_ctx.get("username") or "").split()[0] if user_ctx.get("username") else ""
+    name_line = f"The user's name is {first_name}." if first_name else ""
+    name_greeting = f"Hi {first_name}! " if first_name else ""
+
+    system_prompt = (
+        f"You are a helpful {bank_name} customer service assistant.\n"
+        f"{name_line}\n\n"
+        "The user just completed a guided assistant flow with these confirmed details:\n"
+        f"{slot_lines}\n\n"
+        "## Knowledge Base Article\n"
+        f"{kb_context}\n\n"
+        "## Instructions\n"
+        "1. Follow ONLY the steps in the Knowledge Base Article above — it is the authoritative source.\n"
+        "2. Personalize every step using the user's actual details from the flow (date range, statement type, etc.).\n"
+        "3. Address the user by first name if known.\n"
+        "4. Bold every UI element (e.g. **Accounts**, **Statement**, **Download**).\n"
+        "5. Begin with one warm, personalized sentence that greets the user by first name (if known) and confirms exactly what they are about to do with their chosen options (e.g. date range, statement type). Then immediately follow with the numbered steps — no extra filler.\n"
+        "6. End with one short, helpful closing sentence.\n"
+        "7. Do NOT invent or omit steps — reproduce every step from the KB article."
+    ).strip()
+
+    user_msg = (
+        f"{name_greeting}Please give me the step-by-step instructions to "
+        f"{flow_name.replace('_', ' ')} with my selected options."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+
+    try:
+        text_content, _, usage = await _stream_llm_with_emitter(
+            messages=messages,
+            tools_schema=None,
+            temperature=0.2,
+            emit_fn=emit_fn,
+        )
+        logger.info(
+            "[%s] flow_completion KB-grounded: prompt_tokens=%d completion_tokens=%d",
+            conversation_id,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+        )
+        return text_content or fallback_text
+    except Exception as exc:
+        logger.error("[%s] flow_completion LLM call failed: %s — falling back to template", conversation_id, exc)
+        # Emit the fallback text so the user still gets a response
+        await emit_fn("text_delta", {"delta": fallback_text})
+        return fallback_text
